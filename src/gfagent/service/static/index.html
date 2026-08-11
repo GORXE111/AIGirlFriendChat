@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>林静姝</title>
+<style>
+  :root{
+    --bg:#0d0f13; --panel:#151920; --panel2:#1c212b; --line:#252b36;
+    --text:#e8ebf1; --dim:#8a93a5; --faint:#5b6373;
+    --me:#3b6ef5; --her:#222834;
+    --ok:#3ecf8e; --warn:#e0a33e; --bad:#e2574c;
+    --shadow:0 1px 3px rgba(0,0,0,.3);
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#e8eaf0; --panel:#fff; --panel2:#f4f6f9; --line:#e2e5ec;
+      --text:#151820; --dim:#69707e; --faint:#98a0af;
+      --her:#f0f2f6; --shadow:0 1px 3px rgba(0,0,0,.06);
+    }
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0; display:flex; gap:12px; padding:12px;
+    background:var(--bg); color:var(--text);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC",
+         "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    overflow:hidden;
+  }
+  .col{display:flex; flex-direction:column; min-height:0}
+  #side{width:230px; gap:10px}
+  #main{flex:1; background:var(--panel); border:1px solid var(--line);
+        border-radius:16px; overflow:hidden; box-shadow:var(--shadow)}
+  #diag{width:270px; gap:10px; overflow-y:auto}
+  #diag::-webkit-scrollbar,#log::-webkit-scrollbar{width:7px}
+  #diag::-webkit-scrollbar-thumb,#log::-webkit-scrollbar-thumb{
+    background:var(--line); border-radius:4px}
+  @media (max-width:1240px){ #diag{display:none} }
+  @media (max-width:820px){ #side{display:none} body{padding:0; gap:0}
+    #main{border-radius:0; border:none} }
+
+  .card{background:var(--panel); border:1px solid var(--line);
+        border-radius:12px; padding:11px 12px; box-shadow:var(--shadow)}
+  .card h3{margin:0 0 8px; font-size:11px; color:var(--faint);
+           font-weight:700; letter-spacing:.1em; text-transform:uppercase}
+
+  /* ── 头部 ── */
+  #head{padding:11px 14px; border-bottom:1px solid var(--line);
+        display:flex; align-items:center; gap:11px; background:var(--panel2)}
+  #avatar{width:40px;height:40px;border-radius:50%;flex:none; position:relative;
+    background:linear-gradient(145deg,#7d8ba8,#414c66);
+    display:grid;place-items:center;font-size:16px;color:#fff;font-weight:500}
+  #avatar::after{content:'';position:absolute;right:0;bottom:1px;
+    width:10px;height:10px;border-radius:50%;background:var(--faint);
+    border:2px solid var(--panel2);transition:background .3s}
+  #avatar.online::after{background:var(--ok)}
+  #who{font-weight:600;font-size:15px}
+  #sub{font-size:12.5px;color:var(--dim);height:18px}
+
+  /* ── 消息区 ── */
+  #log{flex:1; overflow-y:auto; padding:16px 14px 6px;
+       display:flex; flex-direction:column; gap:3px; scroll-behavior:smooth}
+  .row{display:flex; max-width:min(74%,560px); animation:in .26s ease-out}
+  .row.me{align-self:flex-end}
+  .row.her{align-self:flex-start}
+  .row+.row.gap{margin-top:9px}
+  @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .bub{padding:8px 13px; border-radius:17px; white-space:pre-wrap;
+       word-break:break-word; font-size:14.8px; position:relative}
+  .me .bub{background:var(--me); color:#fff}
+  .her .bub{background:var(--her)}
+  /* 同一方连发时收紧圆角，形成一组 */
+  .me .bub{border-bottom-right-radius:6px}
+  .her .bub{border-bottom-left-radius:6px}
+  .me.first .bub{border-top-right-radius:17px}
+  .me:not(.first) .bub{border-top-right-radius:6px}
+  .her.first .bub{border-top-left-radius:17px}
+  .her:not(.first) .bub{border-top-left-radius:6px}
+  .me.last .bub{border-bottom-right-radius:17px}
+  .her.last .bub{border-bottom-left-radius:17px}
+
+  .stamp{align-self:center;font-size:11.5px;color:var(--faint);
+         margin:14px 0 8px;letter-spacing:.03em}
+  .sys{align-self:center;color:var(--faint);font-size:12.5px;
+       text-align:center;max-width:78%;margin:8px 0;line-height:1.6}
+
+  #typing{padding:2px 14px 10px;height:38px}
+  #typing:not(.on){visibility:hidden}
+  .dots{display:inline-flex;gap:4px;padding:11px 15px;background:var(--her);
+        border-radius:17px;border-bottom-left-radius:6px}
+  .dots i{width:6px;height:6px;border-radius:50%;background:var(--dim);
+          animation:b 1.25s infinite}
+  .dots i:nth-child(2){animation-delay:.16s}
+  .dots i:nth-child(3){animation-delay:.32s}
+  @keyframes b{0%,62%,100%{opacity:.3;transform:translateY(0)}
+               31%{opacity:.95;transform:translateY(-3.5px)}}
+
+  /* ── 选项 ── */
+  #bar{padding:11px 12px 13px; border-top:1px solid var(--line);
+       background:var(--panel2); display:flex; flex-direction:column; gap:7px;
+       max-height:44vh; overflow-y:auto}
+  input,button,textarea,select{font:inherit; color:var(--text)}
+
+  .opt{display:flex; align-items:center; gap:10px; width:100%;
+       padding:10px 14px; border-radius:12px; text-align:left; cursor:pointer;
+       border:1px solid var(--line); background:var(--panel);
+       transition:.14s; animation:in .22s ease-out backwards}
+  .opt:nth-child(2){animation-delay:.05s}
+  .opt:nth-child(3){animation-delay:.1s}
+  .opt:hover:not(:disabled){border-color:var(--me); transform:translateX(2px)}
+  .opt:disabled{opacity:.4; cursor:default; transform:none}
+  .opt .tone{font-size:11px; color:var(--faint); flex:none;
+             padding:1px 7px; border-radius:20px; background:var(--panel2)}
+  .opt .txt{flex:1; font-size:14.5px}
+
+  .waiting{padding:11px 4px; text-align:center; color:var(--faint); font-size:13px}
+
+  .barhead{font-size:11px; color:var(--faint); letter-spacing:.1em;
+           font-weight:700; padding:0 2px 1px}
+  .topic{display:flex; flex-direction:column; gap:2px; width:100%;
+         padding:9px 14px; border-radius:12px; text-align:left; cursor:pointer;
+         border:1px solid var(--line); background:var(--panel);
+         transition:.14s; animation:in .22s ease-out backwards}
+  .topic:nth-child(3){animation-delay:.05s}
+  .topic:nth-child(4){animation-delay:.1s}
+  .topic:hover{border-color:var(--me); transform:translateX(2px)}
+  .topic b{font-size:14px; font-weight:600}
+  .topic span{font-size:12.5px; color:var(--dim)}
+  .topic .beat{font-size:11px; color:var(--ok)}
+
+  .linkbtn{align-self:center; padding:5px 12px; border-radius:8px;
+           border:none; background:transparent; color:var(--faint);
+           font-size:12.5px; cursor:pointer}
+  .linkbtn:hover{color:var(--me)}
+
+  #beatbar{padding:6px 14px; font-size:12px; color:var(--faint);
+           border-bottom:1px solid var(--line); background:var(--panel2);
+           display:none}
+  #beatbar.on{display:block}
+
+  button.ghost{padding:6px 12px;border-radius:8px;border:1px solid var(--line);
+               background:var(--panel);cursor:pointer;font-size:13px}
+  button.ghost:hover{border-color:var(--me)}
+
+  /* ── 侧栏 ── */
+  .save{padding:8px 10px;border-radius:9px;cursor:pointer;
+        border:1px solid transparent;margin-bottom:4px;transition:.12s}
+  .save:hover{background:var(--panel2)}
+  .save.on{background:var(--panel2);border-color:var(--me)}
+  .save b{display:block;font-weight:600;font-size:14px}
+  .save span{font-size:12px;color:var(--dim)}
+  #new input{width:100%;padding:7px 10px;border-radius:8px;margin-bottom:6px;
+             border:1px solid var(--line);background:var(--panel2);font-size:13.5px}
+  #new .two{display:flex;gap:6px}
+  #new .two input:first-child{width:40%}
+  .preset{display:flex;justify-content:space-between;align-items:center;gap:8px;
+          width:100%;padding:7px 10px;margin-bottom:5px;border-radius:8px;
+          cursor:pointer;text-align:left;
+          border:1px solid var(--line);background:var(--panel2);transition:.12s}
+  .preset:hover{border-color:var(--me)}
+  .preset b{font-size:13.5px;font-weight:600}
+  .preset span{font-size:11.5px;color:var(--faint)}
+
+  .kv{display:flex;justify-content:space-between;gap:8px;
+      padding:2.5px 0;font-size:13px}
+  .kv span{color:var(--dim)}
+  .bar{height:5px;border-radius:3px;background:var(--panel2);
+       overflow:hidden;margin:7px 0 4px}
+  .bar i{display:block;height:100%;border-radius:3px;
+         background:linear-gradient(90deg,var(--me),#7aa2ff);transition:width .5s}
+  .tag{display:inline-block;padding:2px 9px;border-radius:20px;
+       background:var(--panel2);font-size:12px;margin:2px 4px 2px 0;
+       border:1px solid var(--line)}
+  .tag.bad{background:rgba(226,87,76,.15);color:var(--bad);border-color:transparent}
+  .tag.warn{background:rgba(224,163,62,.15);color:var(--warn);border-color:transparent}
+  .tag.ok{background:rgba(62,207,142,.14);color:var(--ok);border-color:transparent}
+  .mini{font-size:12.5px;color:var(--dim);line-height:1.75}
+  .mini b{color:var(--text);font-size:11.5px;letter-spacing:.05em}
+  .mini ul{margin:3px 0 8px;padding-left:15px}
+  .mini li{margin:1px 0}
+  .empty{color:var(--faint);font-size:13px;text-align:center;padding:14px 0}
+</style>
+</head>
+<body>
+
+<div id="side" class="col">
+  <div class="card" style="flex:1;overflow-y:auto;min-height:0">
+    <h3>存档</h3>
+    <div id="saves"></div>
+  </div>
+  <div class="card">
+    <h3>新建</h3>
+    <div id="new">
+      <input id="nName" placeholder="存档名" maxlength="20">
+      <div class="two">
+        <input id="nSur" placeholder="姓" maxlength="4">
+        <input id="nGiv" placeholder="名" maxlength="8">
+      </div>
+      <div id="presets"></div>
+    </div>
+  </div>
+</div>
+
+<div id="main" class="col">
+  <div id="head">
+    <div id="avatar">静</div>
+    <div style="flex:1;min-width:0">
+      <div id="who">林静姝</div>
+      <div id="sub">选一个存档，或者新建</div>
+    </div>
+    <button class="ghost" onclick="doReflect()" title="让她整理一下记忆">归档</button>
+  </div>
+  <div id="beatbar"></div>
+  <div id="log"><div class="empty">还没有开始</div></div>
+  <div id="typing"><div class="dots"><i></i><i></i><i></i></div></div>
+  <div id="bar"><div class="waiting">选一个存档</div></div>
+</div>
+
+<div id="diag" class="col">
+  <div class="card">
+    <h3>关系</h3>
+    <div class="kv"><span>阶段</span><b id="dStage">—</b></div>
+    <div class="bar"><i id="dBar" style="width:0"></i></div>
+    <div class="kv"><span>好感</span><b id="dAff">0</b></div>
+  </div>
+  <div class="card">
+    <h3>她现在</h3>
+    <div id="dNow" class="mini">—</div>
+  </div>
+  <div class="card">
+    <h3>桥段</h3>
+    <div id="dBeat" class="mini">—</div>
+  </div>
+  <div class="card">
+    <h3>情绪</h3>
+    <div id="dEmo" class="mini">—</div>
+  </div>
+  <div class="card">
+    <h3>上一次生成</h3>
+    <div id="dGen" class="mini">—</div>
+  </div>
+  <div class="card" style="flex:1;min-height:120px">
+    <h3>她记住的</h3>
+    <div id="dMem" class="mini">—</div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let sid = null, poller = null, lastDay = null, lastRole = null, lastRow = null;
+
+const api = (p,o) => fetch(p,o).then(r => r.ok ? r.json()
+  : r.json().then(e => Promise.reject(e.detail || r.statusText),
+                  () => Promise.reject(r.statusText)));
+const esc = s => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const fmtDay = s => {
+  const d = new Date(s), t = new Date(), y = new Date(Date.now()-864e5);
+  if (d.toDateString() === t.toDateString()) return '今天';
+  if (d.toDateString() === y.toDateString()) return '昨天';
+  return d.toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'short'});
+};
+
+/* ── 消息渲染 ── */
+function bubble(role, text, at){
+  const empty = $('log').querySelector('.empty');
+  if (empty) empty.remove();
+
+  if (at){
+    const d = fmtDay(at);
+    if (d !== lastDay){ lastDay = d; note('stamp', d); lastRole = null; }
+  }
+  const grouped = role === lastRole;
+  if (lastRow && grouped) lastRow.classList.remove('last');
+
+  const row = document.createElement('div');
+  row.className = `row ${role==='user'?'me':'her'} ${grouped?'':'first gap'} last`;
+  const b = document.createElement('div');
+  b.className = 'bub'; b.textContent = text;
+  row.appendChild(b);
+  $('log').appendChild(row);
+  lastRole = role; lastRow = row;
+  scroll();
+}
+function note(cls, text){
+  const d = document.createElement('div');
+  d.className = cls; d.textContent = text;
+  $('log').appendChild(d); lastRole = null; lastRow = null; scroll();
+}
+function scroll(){ requestAnimationFrame(() => $('log').scrollTop = $('log').scrollHeight); }
+function typing(on){ $('typing').classList.toggle('on', on); if(on) scroll(); }
+
+/* ── 存档 ── */
+async function loadSaves(){
+  const list = await api('/api/saves');
+  $('saves').innerHTML = list.length ? list.map(s => `
+    <div class="save ${s.id===sid?'on':''}" onclick="pick(${s.id})">
+      <b>${esc(s.name)}</b>
+      <span>${esc(s.player||'—')} · ${s.stage_label} · ${Math.round(s.affinity)}</span>
+    </div>`).join('') : '<div class="empty">还没有存档</div>';
+}
+
+async function loadPresets(){
+  const list = await api('/api/presets');
+  $('presets').innerHTML = list.map(p => `
+    <button class="preset" onclick="mkSave('${p.key}')" title="${esc(p.hint)}">
+      <b>${esc(p.label)}</b><span>${p.stage} · 好感 ${p.affinity}</span>
+    </button>`).join('');
+}
+
+async function mkSave(preset){
+  const name = $('nName').value.trim()
+    || ({s0:'从头开始', s1:'试探期', s2:'确认期', s3:'热恋期'}[preset] || '新存档');
+  const r = await api('/api/saves',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name, surname:$('nSur').value.trim() || '陈',
+                         given:$('nGiv').value.trim() || '屿', preset})});
+  $('nName').value = $('nSur').value = $('nGiv').value = '';
+  await loadSaves(); pick(r.id);
+}
+
+async function pick(id){
+  sid = id; lastDay = lastRole = lastRow = null;
+  $('log').innerHTML = ''; typing(false);
+  setBar('<div class="waiting">…</div>');
+  await loadSaves();
+
+  const msgs = await api(`/api/saves/${id}/messages`);
+  if (!msgs.length)
+    note('sys','两周前你们因为一件小事加了好友，之后谁也没说话。');
+  msgs.forEach(m => bubble(m.role, m.content, m.at));
+
+  clearInterval(poller); poller = setInterval(tick, 2000);
+
+  // 打开聊天 —— 她可能主动发起一场戏，也可能让你挑今天聊什么
+  typing(true);
+  try{
+    const r = await api(`/api/saves/${id}/open`,{method:'POST'});
+    if (r.queued.length) renderGen(r); else typing(false);
+    applyTurn(r);
+  }catch(e){ typing(false); note('sys','出错了：'+e); }
+  refresh();
+}
+
+/* ── 选项与话题 ──
+   核心规则：**她说完之前不给选项**。消息还在路上就让玩家选怎么回，
+   等于让他对着还没看到的话做反应，一秒出戏。
+   held 暂存这一回合的选项，等 poll 报告 pending===0 才渲染。 */
+let held = null;
+
+function setBar(html){ $('bar').innerHTML = html; }
+
+function renderOptions(options){
+  setBar(
+    '<div class="barhead">你要说</div>' +
+    options.map((o,i) => `
+      <button class="opt" onclick="choose(${i})">
+        ${o.tone ? `<span class="tone">${esc(o.tone)}</span>` : ''}
+        <span class="txt">${esc(o.text)}</span>
+      </button>`).join('') +
+    '<button class="linkbtn" onclick="changeTopic()">换个话题</button>'
+  );
+}
+
+function renderTopics(topics){
+  if (!topics?.length){
+    setBar('<div class="waiting">…</div>');
+    return;
+  }
+  setBar(
+    '<div class="barhead">今天聊什么</div>' +
+    topics.map((t,i) => `
+      <button class="topic" onclick="chooseTopic(${i})">
+        <b>${esc(t.title)}</b>
+        ${t.beat_id ? '<span class="beat">她可能有话说</span>'
+                    : `<span>${esc(t.opener)}</span>`}
+      </button>`).join('')
+  );
+}
+
+function applyTurn(r){
+  const b = r.beat || {};
+  $('beatbar').classList.toggle('on', !!b.id);
+  if (b.id) $('beatbar').textContent = `${b.title} · 第 ${b.turn} 轮`;
+  if (b.finished){
+    $('beatbar').classList.remove('on');
+    note('sys', `— ${b.finished} —`);
+  }
+
+  if (r.topics?.length)        held = {topics: r.topics};
+  else if (r.options?.length)  held = {options: r.options};
+  // 既没选项也没话题 = 一场戏刚收尾。等她说完再去拉下一批话题，
+  // 而不是让这次请求多等一轮 LLM。
+  else                         held = {fetch: true};
+
+  if (!r.queued.length) release();
+  else setBar('<div class="waiting">…</div>');
+}
+
+function release(){
+  if (!held) return;
+  const h = held; held = null;
+  if (h.topics) renderTopics(h.topics);
+  else if (h.options) renderOptions(h.options);
+  else changeTopic();          // 话锋一转
+}
+
+/* UI 绝不能停在「…」上 —— 出错必须有出口 */
+function barBusy(text){ setBar(`<div class="waiting">${text || '…'}</div>`); }
+function barError(msg){
+  setBar(`<div class="waiting">${esc(msg)}</div>
+          <button class="linkbtn" onclick="changeTopic()">重试</button>`);
+}
+
+async function choose(i){
+  if (!sid) return;
+  const text = document.querySelectorAll('.opt')[i]
+    ?.querySelector('.txt')?.textContent || '';
+  barBusy();
+  bubble('user', text, new Date().toISOString());
+  typing(true);
+  try{
+    const r = await api(`/api/saves/${sid}/choose`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})});
+    renderGen(r); applyTurn(r); refresh();
+  }catch(e){ typing(false); barError('没发出去'); note('sys','出错了：'+e); refresh(); }
+}
+
+async function chooseTopic(i){
+  if (!sid) return;
+  const t = document.querySelectorAll('.topic')[i];
+  const opener = t?.querySelector('span:not(.beat)')?.textContent;
+  barBusy();
+  if (opener) bubble('user', opener, new Date().toISOString());
+  typing(true);
+  try{
+    const r = await api(`/api/saves/${sid}/topic`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})});
+    renderGen(r); applyTurn(r); refresh();
+  }catch(e){ typing(false); barError('没发出去'); note('sys','出错了：'+e); refresh(); }
+}
+
+async function changeTopic(){
+  if (!sid) return;
+  barBusy('想想聊什么…');
+  try{
+    const r = await api(`/api/saves/${sid}/topics`,{method:'POST'});
+    if (r.topics?.length) renderTopics(r.topics);
+    else barError('没想出话题');
+    refresh();
+  }catch(e){ barError('没拿到话题'); refresh(); }
+}
+
+async function tick(){
+  if (!sid) return;
+  try{
+    const r = await api(`/api/saves/${sid}/poll`);
+    r.messages.forEach(m => bubble('assistant', m.content, m.at));
+    typing(r.pending > 0);
+    if (r.pending === 0 && held) release();   // 她说完了，现在才给选项
+  }catch(e){}
+}
+
+/* ── 侧栏状态 ── */
+async function refresh(){
+  if (!sid) return;
+  const s = await api(`/api/saves/${sid}/state`);
+  const pace = {quick:'', slow:'可能回得慢', away:'不太方便看手机'}[s.schedule.pace];
+  $('sub').textContent = pace ? `${s.schedule.window} · ${pace}` : s.schedule.window;
+  $('avatar').classList.toggle('online', s.schedule.pace === 'quick');
+
+  $('dStage').textContent = s.stage_label;
+  $('dAff').textContent = s.affinity;
+  $('dBar').style.width = s.affinity + '%';
+
+  const cls = {quick:'ok', slow:'warn', away:'bad'}[s.schedule.pace];
+  $('dNow').innerHTML =
+    `<span class="tag ${cls}">${s.schedule.window}</span>` +
+    (s.schedule.can_initiate ? '<span class="tag">可能主动</span>' : '') +
+    (s.mother_night_shift ? '<span class="tag ok">她妈值夜班</span>' : '') +
+    (s.pending ? `<span class="tag warn">${s.pending} 条在路上</span>` : '') +
+    (s.schedule.note ? `<div style="margin-top:5px">${esc(s.schedule.note)}</div>` : '');
+
+  const emo = Object.entries(s.emotions);
+  $('dEmo').innerHTML = emo.length
+    ? emo.map(([k,v]) => `<span class="tag">${k} ${Math.round(v*100)}%</span>`).join('')
+    : '<span class="tag ok">平</span>';
+
+  const KIND = {joke:'你们的梗', him:'她看出来的', us:'相处方式'};
+  const ins = (s.insights || []).reduce((a,i)=>{(a[i.kind]??=[]).push(i);return a;},{});
+  const mem = ['joke','him','us'].filter(k=>ins[k]).map(k =>
+      `<b>${KIND[k]}</b><ul>` + ins[k].map(i =>
+        `<li>${esc(i.content)}${i.weight>1?` ×${i.weight}`:''}</li>`).join('') + '</ul>'
+    ).join('')
+    + (s.facts.length ? '<b>关于你</b><ul>' +
+      s.facts.map(f=>`<li>${esc(f)}</li>`).join('') + '</ul>' : '')
+    + (s.episodes.length ? '<b>发生过的事</b><ul>' +
+      s.episodes.map(e=>`<li>${e.happened_at} ${esc(e.summary)}</li>`).join('') + '</ul>' : '')
+    + (s.flags.length ? '<b>标记</b><ul>' +
+      s.flags.map(f=>`<li>${esc(f)}</li>`).join('') + '</ul>' : '');
+  $('dMem').innerHTML = mem || '<div class="empty">聊几句她才会记住</div>';
+
+  $('dBeat').innerHTML = s.beat
+    ? `<span class="tag ok">${esc(s.beat.title)}</span>
+       <span class="tag">第 ${s.beat.turn} 轮</span>`
+    : (s.available_beats.length
+        ? s.available_beats.map(b=>`<span class="tag">${esc(b.title)}</span>`).join('')
+        : '<span class="tag">没有可演的</span>');
+}
+
+function renderGen(r){
+  const d = r.diagnostics, t = [];
+  if (d.violations?.length) t.push(...d.violations.map(v=>`<span class="tag bad">${v}</span>`));
+  if (d.used_fallback) t.push('<span class="tag bad">兜底</span>');
+  if (d.retries) t.push(`<span class="tag warn">重试${d.retries}</span>`);
+  if (d.cleaned?.length) t.push(...[...new Set(d.cleaned)]
+      .map(c=>`<span class="tag warn">${c}</span>`));
+  if (!t.length) t.push('<span class="tag ok">干净</span>');
+  const secs = r.delay_seconds ?? 0;
+  $('dGen').innerHTML = t.join('') +
+    `<div style="margin-top:6px">${r.queued.length} 条 ·
+     ${secs >= 60 ? Math.round(secs/60)+' 分钟后' : secs+' 秒后'} ·
+     ${d.latency_ms??'–'}ms</div>` +
+    `<div>缓存 ${d.cache_hit_rate!=null?Math.round(d.cache_hit_rate*100)+'%':'–'}
+     · ¥${d.cost_cny??'–'}</div>`;
+}
+
+async function doReflect(){
+  if (!sid) return;
+  const r = await api(`/api/saves/${sid}/reflect`,{method:'POST'});
+  note('sys', r.skipped ? '没什么新的可记'
+    : `她记下了 ${r.facts_added} 件关于你的事，${r.episodes_added} 段经历`);
+  refresh();
+}
+
+/* 数字键 1-3 快选 */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= 3){
+    const opt = document.querySelectorAll('.opt')[n - 1];
+    if (opt && !opt.disabled) opt.click();
+  }
+});
+
+loadSaves();
+loadPresets();
+</script>
+</body>
+</html>
