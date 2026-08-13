@@ -171,21 +171,21 @@ def test_care_kinds_catch_paraphrased_repetition():
 
     评审 agent 反复抓到这个，字面查重完全查不出来。
     """
-    from gfagent.agent.core import Agent
-    import re as _re
-
-    kinds = dict(Agent._CARE_KINDS)
     blob = "记得带伞。你湿透了擦一下。外面还在下雨。"
-    hits = [label for pat, label in Agent._CARE_KINDS
-            if len(_re.findall(pat, blob)) >= 2]
-    assert "提醒他别淋雨" in hits
+    assert "提醒他别淋雨" in _care_hits(blob)
 
 
 def test_care_kinds_do_not_fire_on_single_mention():
-    from gfagent.agent.core import Agent
+    assert not _care_hits("记得带伞。今天风扇又坏了。")
+
+
+def _care_hits(blob: str, character_id: str = "h01") -> list[str]:
+    """关心的类型现在在 content/characters/<id>/agent.yaml 里，不在代码里。"""
     import re as _re
 
-    blob = "记得带伞。今天风扇又坏了。"
-    hits = [label for pat, label in Agent._CARE_KINDS
-            if len(_re.findall(pat, blob)) >= 2]
-    assert not hits
+    from gfagent.persona.agent_data import load_agent_data
+
+    return [
+        kind.label for kind in load_agent_data(character_id).care_kinds
+        if len(_re.findall(kind.pattern, blob)) >= 2
+    ]

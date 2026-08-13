@@ -32,7 +32,16 @@ SYSTEM = """你在为一个恋爱游戏维护角色记忆。下面是女主与�
 2. episodes —— 这段对话里发生的**具体事件**，每条必须能对应到记录中的某一天。
    每条不超过 30 字，要具体（「他说胃疼」而不是「聊了健康」）。
 
-**这两类内容会直接读给女主看**，所以一律用「他」指代男主，**绝不出现「男主」「女主」**，
+3. threads_open —— 这段对话里**新出现的、还没了结的共同事**。
+   例：约好周六去面馆 / 他欠她一杯奶茶 / 她的伞落在他那 / 他答应帮她带书
+
+   只记**两个人都牵涉**的事。她一个人的事（她妈值夜班）不算。
+   kind 从 `约定` `亏欠` `物件` `悬念` 里选。
+   owner：`him` 他欠她，`her` 她欠他，`both` 双方的约定。
+
+4. threads_done —— 这段对话里**了结掉的**事。给出原来的 title 原文。
+
+**前两类会直接读给女主看**，所以一律用「他」指代男主，**绝不出现「男主」「女主」**，
 也不要描述女主自己说了什么做了什么 —— 只记他的事。
 
   正确：「他说胃疼」「他问我几点睡」「他夸了我的耳环」
@@ -46,8 +55,11 @@ SYSTEM = """你在为一个恋爱游戏维护角色记忆。下面是女主与�
 
 输出 JSON：
 {"facts": [{"content": "...", "category": "身体|喜好|生活|学习|其他"}],
- "episodes": [{"summary": "...", "happened_at": "YYYY-MM-DD", "importance": 1}]}
-importance 取 1-5，只有真正重要的才给 4-5。"""
+ "episodes": [{"summary": "...", "happened_at": "YYYY-MM-DD", "importance": 1}],
+ "threads_open": [{"title": "周六去面馆", "kind": "约定", "owner": "both"}],
+ "threads_done": [{"title": "他欠她一杯奶茶"}]}
+importance 取 1-5，只有真正重要的才给 4-5。
+没有就给空数组，**不要为了填而编**。"""
 
 
 INSIGHT_EVERY = 6
@@ -93,6 +105,8 @@ class ReflectResult:
     facts_added: int = 0
     episodes_added: int = 0
     insights_added: int = 0
+    threads_opened: int = 0
+    threads_closed: int = 0
     skipped: bool = False
     error: str = ""
 
@@ -173,6 +187,26 @@ class Reflector:
             self.db.add_episode(save_id, summary, ts.isoformat(), importance)
             result.episodes_added += 1
 
+        for t in data.get("threads_open") or []:
+            if not isinstance(t, dict):
+                continue
+            title = str(t.get("title", "")).strip()
+            kind = str(t.get("kind", "约定")).strip()
+            owner = str(t.get("owner", "both")).strip()
+            if not title or len(title) > 30:
+                continue
+            if kind not in ("约定", "亏欠", "物件", "悬念"):
+                kind = "约定"
+            if owner not in ("her", "him", "both"):
+                owner = "both"
+            self.db.open_thread(save_id, title, kind, owner)
+            result.threads_opened += 1
+
+        for t in data.get("threads_done") or []:
+            title = str((t or {}).get("title", "")).strip() if isinstance(t, dict) else str(t).strip()
+            if title and self.db.close_thread(save_id, title):
+                result.threads_closed += 1
+
         self.db.set_reflect_mark(save_id, rows[-1]["id"])
 
         # 综合 —— 情节够多了才做，太少看不出规律
@@ -181,9 +215,9 @@ class Reflector:
             result.insights_added = await self._synthesize(save_id, episodes)
 
         log.info(
-            "save=%s 归档完成：+%d 事实 +%d 情节 +%d 洞察",
+            "save=%s 归档完成：+%d 事实 +%d 情节 +%d 洞察 +%d 悬念 -%d 了结",
             save_id, result.facts_added, result.episodes_added,
-            result.insights_added,
+            result.insights_added, result.threads_opened, result.threads_closed,
         )
         return result
 

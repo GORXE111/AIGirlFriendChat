@@ -164,3 +164,83 @@ def test_stable_text_split():
     persona, lexicon = card.stable_text()
     assert "语气样本" in lexicon
     assert persona and persona not in lexicon
+
+
+# ---------------- 样本的阶段门控 ----------------
+
+
+def test_s3_lines_absent_before_s3():
+    """S3 的直球摆在 S0 的语气样本里，模型会往那个方向偏。
+
+    这不是省 token —— 是易变层的 STAGE_BEHAVIOR 不该被迫去跟稳定前缀里的
+    范例对抗。
+    """
+    for stage in ("S0", "S1", "S2"):
+        samples = load_card("h01", stage).samples
+        assert "九、S3" not in samples, f"{stage} 混进了热恋期样本"
+        assert "想见你。" not in samples, f"{stage} 混进了 S3 直球"
+    assert "想见你。" in load_card("h01", "S3").samples
+
+
+def test_probing_starts_at_s1():
+    """S0 她刚加上好友，不会主动扔钩子。"""
+    assert "五、试探" not in load_card("h01", "S0").samples
+    for stage in ("S1", "S2", "S3"):
+        assert "五、试探" in load_card("h01", stage).samples
+
+
+def test_retract_samples_match_their_own_note():
+    """小节自注：「S1 阶段几乎每次越界后都跟一条。S3 基本消失。」"""
+    assert "六、撤回" not in load_card("h01", "S0").samples
+    assert "六、撤回" in load_card("h01", "S1").samples
+    assert "六、撤回" in load_card("h01", "S2").samples
+    assert "六、撤回" not in load_card("h01", "S3").samples
+
+
+def test_universal_sections_survive_every_stage():
+    """底色、接话能力、禁令在任何阶段都不能掉。"""
+    for stage in ("S0", "S1", "S2", "S3"):
+        samples = load_card("h01", stage).samples
+        assert "记得吃饭。" in samples          # 关心（医生侧）
+        assert "十五、禁用对照" in samples      # 硬禁
+        assert "十二点五、把话接住" in samples  # 接话能力
+
+
+def test_s3_prohibitions_survive_gating_out_section_nine():
+    """「九、S3」被门控掉时，里面那条「S3 也绝不会说的」不能跟着丢。
+
+    波浪号／感叹号／叠字的硬禁在 lexicon 和「十五、禁用对照」里各有一份，
+    所以门控是安全的 —— 这条测试就是钉住这个前提。
+    """
+    for stage in ("S0", "S1", "S2"):
+        card = load_card("h01", stage)
+        blob = card.lexicon + card.samples
+        assert "波浪号" in blob
+        assert "不想说啦" in blob     # 禁用对照里的反例
+
+
+def test_gating_is_monotonic_and_cheap():
+    """S0 最省，且每个阶段都仍是完整可用的卡。"""
+    sizes = {s: len(load_card("h01", s).samples) for s in ("S0", "S1", "S2", "S3")}
+    assert sizes["S0"] < sizes["S1"] <= sizes["S2"] < sizes["S3"]
+    assert all(n > 800 for n in sizes.values()), sizes
+    # 全量（不门控）应该是所有阶段的上界
+    assert len(load_card("h01").samples) >= max(sizes.values())
+
+
+def test_gating_yields_three_stable_prefixes():
+    """前缀缓存要完整匹配，所以变体数量直接决定命中率。
+
+    S1 和 S2 的**样本集合故意相同** —— 两个阶段用的是同一类台词，
+    区别只是频率（`STAGE_BEHAVIOR.retract_rate` 0.75 → 0.35）。
+    频率属于易变层，不该靠换一份前缀来表达。
+
+    于是四个阶段只落成三份前缀，缓存变体更少。
+    """
+    cards = {s: load_card("h01", s) for s in ("S0", "S1", "S2", "S3")}
+    texts = {s: c.stable_text()[1] for s, c in cards.items()}
+    assert texts["S1"] == texts["S2"]
+    assert len({texts["S0"], texts["S1"], texts["S3"]}) == 3
+
+    # 同参数必须命中同一个缓存对象，否则每回合重新装配
+    assert load_card("h01", "S1") is cards["S1"]

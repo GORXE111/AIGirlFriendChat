@@ -110,8 +110,11 @@
   .opt:nth-child(3){animation-delay:.1s}
   .opt:hover:not(:disabled){border-color:var(--me); transform:translateX(2px)}
   .opt:disabled{opacity:.4; cursor:default; transform:none}
-  .opt .tone{font-size:11px; color:var(--faint); flex:none;
-             padding:1px 7px; border-radius:20px; background:var(--panel2)}
+  .opt .tone{font-size:11px; flex:none; padding:1px 8px; border-radius:20px;
+             background:var(--panel2); color:var(--faint)}
+  .opt .tone.往前{background:rgba(62,207,142,.15); color:var(--ok)}
+  .opt .tone.越界{background:rgba(226,87,76,.15); color:var(--bad)}
+  .opt .tone.后退{background:rgba(224,163,62,.13); color:var(--warn)}
   .opt .txt{flex:1; font-size:14.5px}
 
   .waiting{padding:11px 4px; text-align:center; color:var(--faint); font-size:13px}
@@ -231,6 +234,10 @@
   <div class="card">
     <h3>桥段</h3>
     <div id="dBeat" class="mini">—</div>
+  </div>
+  <div class="card">
+    <h3>还悬着的事</h3>
+    <div id="dThread" class="mini">—</div>
   </div>
   <div class="card">
     <h3>情绪</h3>
@@ -485,6 +492,12 @@ async function refresh(){
   $('dEmo').innerHTML = emo.length
     ? emo.map(([k,v]) => `<span class="tag">${k} ${Math.round(v*100)}%</span>`).join('')
     : '<span class="tag ok">平</span>';
+
+  const OWNER = {him:'他欠', her:'她欠', both:'约好'};
+  $('dThread').innerHTML = (s.threads||[]).length
+    ? s.threads.map(t=>`<div><span class="tag warn">${OWNER[t.owner]||''}</span>
+        ${esc(t.title)}</div>`).join('')
+    : '<span class="tag">没有悬着的事</span>';
 
   const KIND = {joke:'你们的梗', him:'她看出来的', us:'相处方式'};
   const ins = (s.insights || []).reduce((a,i)=>{(a[i.kind]??=[]).push(i);return a;},{});

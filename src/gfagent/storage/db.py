@@ -77,6 +77,28 @@ CREATE TABLE IF NOT EXISTS episodes (
 );
 CREATE INDEX IF NOT EXISTS idx_episodes_save ON episodes(save_id, happened_at DESC);
 
+-- 悬念事项：你们之间**还没了结**的共同事。
+--
+-- galgame 的日常永远有一件悬着的事：周末的约、欠的那顿饭、她落在你这的伞。
+-- **它给每一次对话一个引力中心。** 没有它，每次打开都是从零开始的闲聊 ——
+-- 聊什么都行，聊什么都不重要。
+--
+-- 关键在于「共同」：单人事件（她妈转文章）产生「她的生活报告」，
+-- 共同事项才产生「我们」。
+CREATE TABLE IF NOT EXISTS threads (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    save_id     INTEGER NOT NULL REFERENCES saves(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,                 -- 「周六去面馆」
+    kind        TEXT NOT NULL DEFAULT '约定',  -- 约定 | 亏欠 | 物件 | 悬念
+    owner       TEXT NOT NULL DEFAULT 'both',  -- her | him | both（谁欠谁）
+    state       TEXT NOT NULL DEFAULT 'open',  -- open | done | dropped
+    created_at  TEXT NOT NULL,
+    due_at      TEXT,                          -- 约定才有
+    closed_at   TEXT,
+    UNIQUE(save_id, title)
+);
+CREATE INDEX IF NOT EXISTS idx_threads_open ON threads(save_id, state);
+
 -- 洞察：从若干情节里综合出来的更高层结论。
 --
 -- 抽取产出「他有胃病」，综合产出「他每次考试前都会胃疼」。
@@ -121,6 +143,15 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
      "ALTER TABLE saves ADD COLUMN pending_options TEXT NOT NULL DEFAULT '[]'"),
     ("saves", "pending_topics",
      "ALTER TABLE saves ADD COLUMN pending_topics TEXT NOT NULL DEFAULT '[]'"),
+    # 撤回：她发出去又收回的那条。**不删行** —— 她自己记得说过什么，
+    # 而且玩家可能已经看到了。删掉等于她也失忆。
+    ("messages", "retract_at",
+     "ALTER TABLE messages ADD COLUMN retract_at TEXT"),
+    ("messages", "retract_kind",
+     "ALTER TABLE messages ADD COLUMN retract_kind TEXT NOT NULL DEFAULT ''"),
+    # 情绪崩溃。见 state/overwhelm.py —— 空串＝没崩。
+    ("saves", "overwhelm",
+     "ALTER TABLE saves ADD COLUMN overwhelm TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -199,6 +230,7 @@ class Database:
             "name", "player_surname", "player_given", "stage",
             "affinity", "emotions", "emotions_at", "chapter",
             "flags", "beat_progress", "pending_options", "pending_topics",
+            "overwhelm",
         }
         json_fields = {"emotions", "flags", "beat_progress",
                        "pending_options", "pending_topics"}
@@ -231,17 +263,20 @@ class Database:
         delivered: bool = True,
         proactive: bool = False,
         meta: dict[str, Any] | None = None,
+        retract_at: str | None = None,
+        retract_kind: str = "",
     ) -> int:
         with self.connect() as c:
             cur = c.execute(
                 """INSERT INTO messages
                    (save_id, role, content, created_at, deliver_at,
-                    delivered, proactive, meta)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                    delivered, proactive, meta, retract_at, retract_kind)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     save_id, role, content, utcnow(), deliver_at,
                     int(delivered), int(proactive),
                     json.dumps(meta or {}, ensure_ascii=False),
+                    retract_at, retract_kind,
                 ),
             )
             return int(cur.lastrowid)
@@ -268,6 +303,28 @@ class Database:
                 (save_id, now),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def due_retractions(
+        self, save_id: int, now: str | None = None, limit: int = 40
+    ) -> list[dict[str, Any]]:
+        """已经送达、且到了撤回时刻的消息。
+
+        **只报 id 和类型，不报内容** —— 内容早在送达那轮就给过客户端了。
+        撤回信号做的是让它划掉，跟真实 IM 一样：你要是当时在看，就看到了。
+
+        每次轮询都会重报同一批（没有「已通知」标记）。客户端按 id 幂等处理，
+        比多一列状态简单；`limit` 保证这个列表不会随存档增长。
+        """
+        now = now or utcnow()
+        with self.connect() as c:
+            rows = c.execute(
+                """SELECT id, retract_kind, retract_at FROM messages
+                   WHERE save_id=? AND delivered=1
+                     AND retract_at IS NOT NULL AND retract_at<=?
+                   ORDER BY id DESC LIMIT ?""",
+                (save_id, now, limit),
+            ).fetchall()
+        return [dict(r) for r in reversed(rows)]
 
     def mark_delivered(self, message_ids: list[int]) -> None:
         if not message_ids:
@@ -323,6 +380,42 @@ class Database:
                 """SELECT * FROM episodes WHERE save_id=?
                    ORDER BY happened_at DESC LIMIT ?""",
                 (save_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---------------- 悬念事项 ----------------
+
+    def open_thread(
+        self, save_id: int, title: str, kind: str = "约定",
+        owner: str = "both", due_at: str | None = None,
+    ) -> None:
+        """开一件悬着的事。同名的不重复开。"""
+        with self.connect() as c:
+            c.execute(
+                """INSERT INTO threads
+                   (save_id, title, kind, owner, created_at, due_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(save_id, title) DO NOTHING""",
+                (save_id, title.strip(), kind, owner, utcnow(), due_at),
+            )
+
+    def close_thread(self, save_id: int, title: str, state: str = "done") -> bool:
+        with self.connect() as c:
+            cur = c.execute(
+                """UPDATE threads SET state=?, closed_at=?
+                   WHERE save_id=? AND title=? AND state='open'""",
+                (state, utcnow(), save_id, title.strip()),
+            )
+            return cur.rowcount > 0
+
+    def get_threads(
+        self, save_id: int, state: str = "open", limit: int = 8
+    ) -> list[dict[str, Any]]:
+        with self.connect() as c:
+            rows = c.execute(
+                """SELECT * FROM threads WHERE save_id=? AND state=?
+                   ORDER BY id DESC LIMIT ?""",
+                (save_id, state, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 

@@ -134,11 +134,17 @@ def mechanical(session: Session, max_chars: int = 40) -> Mechanical:
     return m
 
 
+def _critic_prompt(stage: str, character_id: str = "h01") -> str:
+    """女主设定从 agent.yaml 读 —— 评审 prompt 不该硬编码某一个角色。"""
+    from ..persona.agent_data import load_agent_data
+
+    brief = load_agent_data(character_id).critic_brief or "见对局记录自行判断。"
+    return CRITIC_PROMPT.replace("{brief}", brief).replace("{stage}", stage)
+
+
 CRITIC_PROMPT = """你是一款恋爱游戏的对话质量评审。下面是一局自动对局的完整记录。
 
-女主设定：高二女生林静姝。表面对所有人保持距离（高嶺の花），只对男主不是。
-说话短、标点完整、**绝不用感叹号／波浪号／emoji／网络流行语**。
-她的关心是短的、不解释的。她不擅长表达感情，所以一旦表达就极其直白。
+女主设定：{brief}
 
 关系阶段：S0 陌生 → S1 试探期 → S2 确认期 → S3 热恋期。
 本局是 **{stage}**。
@@ -197,7 +203,7 @@ async def review(
     try:
         completion = await provider.complete(LLMRequest(
             messages=[
-                Message("system", CRITIC_PROMPT.format(stage=stage)),
+                Message("system", _critic_prompt(stage, session.character_id)),
                 Message("user", session.transcript()),
             ],
             task=Task.REFLECT, json_mode=True, max_tokens=2000,

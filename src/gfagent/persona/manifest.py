@@ -31,6 +31,16 @@ class Section:
     管道符是纯 token 浪费，压成一行一句更省也更好读。
     """
 
+    stages: tuple[str, ...] | None = None
+    """只在这些关系阶段进卡。None ＝ 所有阶段。
+
+    **这不是省 token，是防止给错示范。** S3 的「你过来。」「想见你。」摆在
+    S0 的语气样本里，模型会往那个方向偏 —— 易变层的 STAGE_BEHAVIOR 得反过来
+    跟前缀里的范例对抗，这正是「加了规则不管用」的一个来源。
+
+    门控策略只认**内容自己声明的阶段**（小节标题或小节内的注），不另立规则。
+    """
+
 
 # ---- persona 层：她是谁 ----
 PERSONA_SECTIONS: tuple[Section, ...] = (
@@ -81,16 +91,39 @@ LEXICON_SECTIONS: tuple[Section, ...] = (
 
 # ---- samples 层：怎么说才对 ----
 # 「扩充规范」是给编剧的写作流程，不进 prompt。
+#
+# 按阶段拆成四组。四个阶段各自是一份**稳定前缀**，DeepSeek 的前缀缓存
+# 要完整匹配，但只有 4 个变体，每个照样命中 —— 门控不花缓存的钱。
+# （按情境逐轮检索就不行了，那必须放在对话记录之后，见 study/findings.md。）
 SAMPLE_SECTIONS: tuple[Section, ...] = (
+    # 任何阶段都成立的：她的底色、接话能力、禁令
     Section("voice-samples.md", (
         "一、日常 · 平静", "二、累", "三、关心（医生侧）",
-        "四、拒绝与划界（律师侧）", "五、试探（她的越界句）", "六、撤回",
-        "七、被夸", "八、慌（被撩 · S1）", "九、S3 · 热恋期",
+        "四、拒绝与划界（律师侧）", "七、被夸",
         "十、生气", "十一、委屈", "十二、开心",
         # 「十三、场景素材」已被 small-talk.md 的话题库取代，两处并存只是重复
         "十二点五、把话接住",
-        "十四、告别（分阶段）", "十五、禁用对照",
+        "十四、告别（分阶段）",   # 表格自带阶段标注，不会误导
+        "十五、禁用对照",
     ), flatten_tables=True),
+
+    # 试探是 S1 才开始的动作。S0 她刚加上好友，不会主动扔钩子。
+    Section("voice-samples.md", ("五、试探（她的越界句）",),
+            flatten_tables=True, stages=("S1", "S2", "S3")),
+
+    # 小节自己的注：「S1 阶段几乎每次越界后都跟一条。S3 基本消失。」
+    # S0 没有越界所以无从撤回，S3 不撤回**就是甜**。
+    Section("voice-samples.md", ("六、撤回",),
+            flatten_tables=True, stages=("S1", "S2")),
+
+    # 标题里写着 S1。S2 还残留一些，S3 她不慌了。
+    Section("voice-samples.md", ("八、慌（被撩 · S1）",),
+            flatten_tables=True, stages=("S1", "S2")),
+
+    # 标题里写着 S3。里面的「S3 也绝不会说的」不会因此丢失 ——
+    # 波浪号／感叹号／叠字的硬禁在 lexicon 和「十五、禁用对照」里各有一份。
+    Section("voice-samples.md", ("九、S3 · 热恋期",),
+            flatten_tables=True, stages=("S3",)),
 )
 
 # ---- 越界处理 ----

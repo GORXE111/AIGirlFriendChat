@@ -89,11 +89,10 @@ ASSISTANT_TELLS: tuple[tuple[str, str], ...] = (
 _ASSISTANT_RE = tuple((re.compile(p), label) for p, label in ASSISTANT_TELLS)
 
 # 兜底话术池（edge-cases.md §9）。宁可沉默，也不要破人设。
-FALLBACKS: dict[str, tuple[str, ...]] = {
-    "generic": ("……", "嗯。", "等一下。"),
-    "blocked": ("不说这个了。",),
-    "timeout": ("刚才在忙。",),
-}
+#
+# 台词在 `content/characters/<id>/agent.yaml` 的 fallbacks。这里只留一份
+# **不认得任何角色时**的兜底 —— 三个点对谁都成立，不会破任何人的人设。
+LAST_RESORT: tuple[str, ...] = ("……",)
 
 
 @dataclass(slots=True)
@@ -261,6 +260,11 @@ def process(
     return result
 
 
-def fallback(kind: str = "generic", index: int = 0) -> ProcessResult:
-    pool = FALLBACKS.get(kind, FALLBACKS["generic"])
+def fallback(
+    kind: str = "generic", index: int = 0, character_id: str = "h01",
+) -> ProcessResult:
+    """人设级违规重试仍失败时的兜底。宁可沉默，也不要破人设。"""
+    from ..persona.agent_data import load_agent_data
+
+    pool = load_agent_data(character_id).fallback_pool(kind) or LAST_RESORT
     return ProcessResult(messages=[pool[index % len(pool)]], used_fallback=True)

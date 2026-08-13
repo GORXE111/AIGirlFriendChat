@@ -27,10 +27,23 @@ from ..llm import Completion, DeepSeekProvider, LLMError, LLMRequest, Message, T
 from ..memory.retrieval import context_keywords, rank_episodes, rank_facts
 from ..metrics import UsageRecorder
 from ..output.postprocess import fallback, process
+from ..output.slips import apply_regret, apply_typo, strip_regret_mark
+from ..persona.agent_data import load_agent_data
 from ..persona.loader import load_card
 from ..prompt import PromptBuilder, StablePrefix, VolatileContext
 from ..schedule import ScheduleEngine
 from ..state.moods import behavior_note
+from ..state.overwhelm import (
+    MAX_TURN_DELTA,
+    RUNG_MINUTES,
+    SOOTHE_SPEEDUP,
+    Overwhelm,
+    Rung,
+    behavior_note as overwhelm_note,
+    broken_line,
+    check,
+    delay_multiplier,
+)
 from ..state.models import (
     STAGE_BEHAVIOR,
     Emotion,
@@ -39,14 +52,18 @@ from ..state.models import (
     stage_for_affinity,
 )
 from ..storage.db import Database, parse_ts, utcnow
+from . import gates
 from .turn import (
     MAX_OPTIONS,
+    SITUATION_OPTIONS,
+    SITUATION_TONE,
     Option,
     Topic,
     TurnPlan,
     instructions,
     parse,
     parse_topics,
+    tail_rules,
     topic_instructions,
 )
 
@@ -95,12 +112,34 @@ class TurnResult:
     emotion_note: str = ""
     delay_seconds: int = 0
 
+    feeling: dict[str, float] = field(default_factory=dict)
+    """这一轮他的话让她的情绪变了多少。空 ＝ 没戳到。"""
+
+    overwhelm: str = ""
+    """崩溃档位（`Rung.label`）。空 ＝ 没崩。非空时 options 是局面选项。"""
+
+    situation: str = ""
+    """崩溃期玩家做了什么：wait / push_helped / push_backfired / leave。"""
+
     completion: Completion | None = None
     violations: list[str] = field(default_factory=list)
     cleaned: list[str] = field(default_factory=list)
+    slips: list[str] = field(default_factory=list)
+    """本回合发生的手滑／撤回，用于观测。"""
     retries: int = 0
     used_fallback: bool = False
     raw_text: str = ""
+
+
+def _recovery_opener(emo: Emotion, stage: Stage, character_id: str = "h01") -> str:
+    """她缓过来之后主动发的第一条。**这就是她的道歉。**
+
+    句子在 `content/characters/<id>/agent.yaml` 的 recovery_openers。
+    """
+    pool = load_agent_data(character_id).recovery_pool(stage.value)
+    # 用情绪名的字符和取下标：`hash()` 在 Python 里对 str 是加盐的，
+    # 进程间不一致，同一次崩溃重算会得到不同的句子。
+    return pool[sum(map(ord, emo.value)) % len(pool)]
 
 
 class Agent:
@@ -161,7 +200,9 @@ class Agent:
     # ---------------- prompt 装配 ----------------
 
     def _stable(self, save: dict) -> StablePrefix:
-        card = load_card(save["character_id"])
+        # 按阶段装配：S3 的直球台词不该出现在 S0 的语气样本里。
+        # 只有 4 个变体，每个仍是稳定前缀，前缀缓存照常命中。
+        card = load_card(save["character_id"], save["stage"])
         persona, lexicon = card.stable_text()
 
         surname = (save["player_surname"] or "").strip()
@@ -195,6 +236,15 @@ class Agent:
         mood = behavior_note(emotions.active())
         if mood:
             blocks.append(mood)
+
+        # 恢复期覆盖常规情绪演出。moods.md 的阶梯是「先恢复长度，再恢复标点，
+        # 最后才恢复主动」—— 不注入的话，缓过来的两级跟平时完全一样，
+        # 那这个阶梯就只存在于代码里，玩家一点都感觉不到。
+        broken = Overwhelm.from_json(save.get("overwhelm"))
+        if broken is not None:
+            note = overwhelm_note(broken.rung(), broken.emo)
+            if note:
+                blocks.append(note)
 
         # 检索按「当前在聊什么」打分，不是简单取最新的。
         # 只取最新的话，记忆一多，早期的重要事件就永远拿不到 ——
@@ -235,6 +285,24 @@ class Agent:
                 + "\n".join(lines)
             )
 
+        # 悬念事项 —— 每次对话的引力中心。
+        # 没有它，每次打开都是从零开始的闲聊：聊什么都行，聊什么都不重要。
+        threads = self.db.get_threads(save["id"])
+        if threads:
+            lines = []
+            for t in threads:
+                age = (now_local - parse_ts(t["created_at"])
+                       .astimezone(now_local.tzinfo)).days
+                when = "今天说的" if age == 0 else f"{age} 天前说的"
+                who = {"him": "他欠你", "her": "你欠他", "both": "你们约好"}[t["owner"]]
+                lines.append(f"- 【{t['title']}】{who}，{when}")
+            blocks.append(
+                "你们之间还悬着的事：\n" + "\n".join(lines)
+                + "\n\n**这些是你们对话的引力中心。** 顺手提一句、拿来打趣、"
+                  "或者催他 —— 都比凭空找话题自然。\n"
+                  "**放得越久越有分量**：三天前的约是期待，两周没还的东西就是梗了。"
+            )
+
         # 洞察 —— 从多条情节里综合出来的规律。
         # 「他有胃病」是记得；「他每次考试前都会胃疼」才是懂。
         insights = self.db.get_insights(save["id"], limit=12)
@@ -272,7 +340,7 @@ class Agent:
             blocks.append(f"这场戏已经演了 {beat_turn} 轮"
                           f"（{beat.min_turns}–{beat.max_turns} 轮）。")
 
-        repetition = self._avoid_repetition(save["id"])
+        repetition = self._avoid_repetition(save["id"], save["character_id"])
         if repetition:
             blocks.append(repetition)
 
@@ -289,6 +357,7 @@ class Agent:
                 can_finish=can_finish,
                 outcome_ids=outcome_ids,
                 stage=stage.value,
+                name=load_agent_data(save["character_id"]).name,
             ),
         )
 
@@ -304,23 +373,28 @@ class Agent:
         rows = self.db.recent_messages(save_id, limit=HISTORY_TURNS, delivered_only=False)
         if not rows:
             return "（还没说过话。这是第一句。）"
-        lines = [
-            f"{'她' if r['role'] == 'assistant' else '他'}：{r['content']}"
-            for r in rows
-        ]
+        lines = []
+        for r in rows:
+            who = "她" if r["role"] == "assistant" else "他"
+            # 手滑发出去的错字，记录里还原成正确的。
+            # 让她看见自己的错字，她会把错字当成自己的说话风格。
+            content = self._meta(r).get("clean") or r["content"]
+            # 撤回的照样进记录：**她记得自己差点说了什么。**
+            # 不给她看，她就会在下一轮若无其事地再说一遍同样的话。
+            if r["retract_at"]:
+                lines.append(f"{who}：{content}（说完就撤回了，他不一定看到）")
+            else:
+                lines.append(f"{who}：{content}")
         return "\n".join(lines)
 
-    # 她反复用的几种关心。同一类连说两次就腻了。
-    _CARE_KINDS: tuple[tuple[str, str], ...] = (
-        ("带伞|淋|湿|雨", "提醒他别淋雨"),
-        ("睡|熬|困|几点", "让他早点睡"),
-        ("吃|饭|饿|凉|辣", "让他好好吃饭"),
-        ("胃|疼|难受|药|医", "问他身体"),
-        ("冷|穿|外套|降温", "让他多穿点"),
-        ("迟到|早点来|等", "叮嘱时间"),
-    )
+    @staticmethod
+    def _meta(row: dict) -> dict:
+        try:
+            return json.loads(row.get("meta") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
-    def _avoid_repetition(self, save_id: int) -> str:
+    def _avoid_repetition(self, save_id: int, character_id: str = "h01") -> str:
         """反复读提示。
 
         DeepSeek 废弃了 frequency_penalty，采样层解决不了，只能在 prompt 里说。
@@ -328,6 +402,9 @@ class Agent:
         字面重复只是一小部分 —— 更难缠的是**语义重复**：
         「带伞」「擦干」「别淋着」是三句不同的话，同一种关心。
         评审 agent 反复抓到这个，所以这里按"关心的类型"归并检测。
+
+        关心的类型在 `content/characters/<id>/agent.yaml` 的 care_kinds ——
+        每个女主关心人的方式不一样，这份表不该写死在代码里。
         """
         rows = self.db.recent_messages(save_id, limit=10, delivered_only=False)
         recent = [r["content"] for r in rows if r["role"] == "assistant"][-5:]
@@ -341,8 +418,8 @@ class Agent:
 
         blob = "".join(recent)
         repeated = [
-            label for pattern, label in self._CARE_KINDS
-            if len(re.findall(pattern, blob)) >= 2
+            kind.label for kind in load_agent_data(character_id).care_kinds
+            if len(re.findall(kind.pattern, blob)) >= 2
         ]
         if repeated:
             notes.append(
@@ -359,6 +436,8 @@ class Agent:
     async def open_chat(self, save_id: int) -> TurnResult:
         """玩家打开聊天。她可能主动发起一场戏，也可能什么都没有。"""
         save = self._require(save_id)
+        if (gated := self._gate(save)) is not None:
+            return gated
         emotions = EmotionState.from_json(save["emotions"])
         emotions.apply_decay()
         self._passive_emotions(save, emotions)
@@ -389,6 +468,8 @@ class Agent:
     async def choose_topic(self, save_id: int, index: int) -> TurnResult:
         """玩家选了今天的话题。opener 作为他的第一句话发出去。"""
         save = self._require(save_id)
+        if (gated := self._gate(save)) is not None:
+            return gated
         topics = self._pending_topics(save)
         if not 0 <= index < len(topics):
             raise IndexError(f"话题越界：{index}（共 {len(topics)} 个）")
@@ -450,7 +531,8 @@ class Agent:
             stable=self._stable(save),
             volatile=self._volatile(
                 save, emotions, None, 0,
-                notes=topic_instructions(save["stage"]),
+                notes=topic_instructions(save["stage"],
+                                         load_agent_data(save["character_id"]).name),
             ),
             history=[Message(
                 "user",
@@ -481,6 +563,12 @@ class Agent:
             raise IndexError(f"选项越界：{index}（共 {len(options)} 个）")
 
         chosen = options[index]
+
+        # 崩溃期走另一条路：不调模型，只处置局面。
+        # 这里传 chosen 是因为局面选项本身就是玩家的处置动作。
+        if (gated := self._gate(save, chosen)) is not None:
+            return gated
+
         self.db.add_message(save_id, "user", chosen.text,
                             meta={"tone": chosen.tone, "chosen": index})
 
@@ -495,6 +583,8 @@ class Agent:
     async def start_beat(self, save_id: int, beat_id: str) -> TurnResult:
         """玩家主动开启一场戏。"""
         save = self._require(save_id)
+        if (gated := self._gate(save)) is not None:
+            return gated
         beat = get_beat(beat_id, save["character_id"])
         if beat is None:
             raise KeyError(f"没有这场戏：{beat_id}")
@@ -505,6 +595,141 @@ class Agent:
         progress.beat_id = beat.id
         progress.turn = 0
         return await self._run(save, emotions, beat, progress)
+
+    # ---------------- 闸门 ----------------
+
+    def _gate(self, save: dict, chosen: Option | None = None) -> TurnResult | None:
+        """**所有入口的第一句话。**
+
+        返回 `None` ＝ 照常走；返回 `TurnResult` ＝ 这一轮已经处理完了，直接回。
+
+        入口不需要知道有几种闸、分别为什么 —— 见 `agent/gates.py` 的模块文档。
+        """
+        result = gates.evaluate(save)
+        if result.normal:
+            return None
+
+        # 目前只有一种非正常处置。多一种时在这里分派，**不要回到入口里加 if**。
+        assert result.overwhelm is not None
+        return self._handle_situation(save, result.overwhelm, chosen)
+
+    # ---------------- 崩溃期 ----------------
+
+    def _situation_options(self) -> list[Option]:
+        return [Option(text=t, tone=SITUATION_TONE) for t, _ in SITUATION_OPTIONS]
+
+    def _handle_situation(
+        self, save: dict, broken: Overwhelm, chosen: Option | None,
+    ) -> TurnResult:
+        """她崩着的时候，玩家能做的三件事。
+
+        **不调模型。** 这时候她本来就说不出完整的话，模型给什么都是多的；
+        而且崩溃期玩家可能连点好几次，每次都调一遍纯属烧钱。
+
+        `chosen is None` ＝ 玩家不是在处置局面，只是打开了聊天／想换话题。
+        那只把当前局面摆出来，**不消耗动作、不再发消息** —— 否则每点一下
+        界面她就多「……」一条，读起来像刷屏。
+        """
+        save_id = save["id"]
+        rung = broken.rung()
+
+        if chosen is None:
+            peek = TurnResult(stage=Stage(save["stage"]),
+                              affinity=float(save["affinity"]))
+            peek.overwhelm = rung.label
+            peek.situation = "peek"
+            peek.options = self._situation_options()
+            self.db.update_save(
+                save_id, pending_options=[o.as_dict() for o in peek.options])
+            return peek
+
+        action = dict(
+            (text, act) for text, act in SITUATION_OPTIONS
+        ).get(chosen.text, "wait")
+
+        self.db.add_message(save_id, "user", chosen.text,
+                            meta={"tone": SITUATION_TONE, "situation": action})
+
+        emotions = EmotionState.from_json(save["emotions"])
+        emotions.apply_decay()
+        result = TurnResult(stage=Stage(save["stage"]),
+                            affinity=float(save["affinity"]))
+
+        if action == "leave":
+            # 不惩罚也不加速。今天到此为止 —— 走开本来就不是错的选择。
+            result.situation = "leave"
+            result.options = []
+            self.db.update_save(save_id, pending_options=[])
+            return result
+
+        if action == "push":
+            # 玩家唯一的主动权。**再说一句可能哄好，也可能更糟。**
+            #
+            # 这里不判断他说了什么（局面选项是固定文本，没有内容）——
+            # 判的是**时机**：她刚崩的时候你去戳，只会更糟；缓了一级之后
+            # 再说话才有用。这正是 moods.md「追问对你是压力」的实现。
+            if rung is Rung.BROKEN:
+                emotions.bump(Emotion(broken.emo.value), 0.08,
+                              Stage(save["stage"]))
+                result.situation = "push_backfired"
+            else:
+                broken = broken.sped_up(RUNG_MINUTES[rung] * SOOTHE_SPEEDUP)
+                emotions.soothe(broken.emo, 0.1)
+                result.situation = "push_helped"
+        else:
+            result.situation = "wait"
+
+        rung = broken.rung()
+        result.overwhelm = rung.label
+        result.delay_seconds = int(
+            self._rng.randint(20, 90) * delay_multiplier(rung)
+        )
+
+        # **一定回一句。** 界面不能是空的 —— 玩家点了没反应，
+        # 第一反应是卡了不是她在难过。局面由选项区表达。
+        line = broken_line(broken.emo, self._rng.randrange(3), save["character_id"])
+        cursor = self.schedule.now_local() + timedelta(
+            seconds=max(1, int(result.delay_seconds * self.delay_scale))
+        )
+        self.db.add_message(
+            save_id, "assistant", line,
+            deliver_at=cursor.astimezone(timezone.utc).isoformat(),
+            delivered=False,
+            meta={"overwhelm": rung.label, "situation": action},
+        )
+        result.scheduled.append((line, cursor))
+
+        result.options = self._situation_options()
+        self.db.update_save(
+            save_id,
+            emotions=emotions.to_json(), emotions_at=utcnow(),
+            overwhelm=broken.to_json(),
+            pending_options=[o.as_dict() for o in result.options],
+        )
+        return result
+
+    def _enter_overwhelm(
+        self, save_id: int, broken: Overwhelm, stage: Stage,
+        character_id: str = "h01",
+    ) -> None:
+        """崩了。顺手把「缓过来之后主动发的那条」排进未来。
+
+        **复用现成的 deliver_at 排期** —— 不需要额外的定时器或轮询任务。
+        她的道歉就是恢复主动（`content/characters/h01/moods.md`：
+        「先恢复长度，再恢复标点，最后才恢复主动」），所以这条消息本身
+        就是道歉，内容是别的事。
+        """
+        self.db.update_save(save_id, overwhelm=broken.to_json())
+        log.info("save=%s 情绪崩溃：%s peak=%.2f 起因=%s",
+                 save_id, broken.emo.value, broken.peak, broken.cause[:40])
+
+        at = broken.recovers_at()
+        self.db.add_message(
+            save_id, "assistant", _recovery_opener(broken.emo, stage, character_id),
+            deliver_at=at.astimezone(timezone.utc).isoformat(),
+            delivered=False, proactive=True,
+            meta={"overwhelm": "缓·主动", "apology": True},
+        )
 
     # ---------------- 内部 ----------------
 
@@ -522,6 +747,19 @@ class Agent:
         stage = Stage(save["stage"])
         behavior = STAGE_BEHAVIOR[stage]
 
+        # 走到这里说明闸放行了。但「放行」有两种：没崩过，和刚爬完阶梯。
+        # 后者要清账 —— 不清的话恢复期的行为约束会永远挂着，
+        # 而且下一次崩溃会被旧记录挡住。
+        #
+        # 清账放在这里而不是闸里，是因为闸不产生副作用（见 gates.py）：
+        # 只有真的要跑这一轮，才该动库。
+        gate = gates.evaluate(save)
+        recovering = gate.overwhelm
+        if recovering is not None and recovering.recovered():
+            self.db.update_save(save_id, overwhelm="")
+            save = self._require(save_id)
+            recovering = None
+
         result = TurnResult(
             stage=stage, affinity=save["affinity"],
             beat_id=beat.id if beat else None,
@@ -531,15 +769,25 @@ class Agent:
 
         sched = self.schedule.state()
         result.delay_seconds = min(sched.delay_seconds, self.max_delay_seconds)
+        if recovering is not None:
+            # 还没缓透，回得比平时慢
+            rung = recovering.rung()
+            result.overwhelm = rung.label
+            result.delay_seconds = min(
+                int(result.delay_seconds * delay_multiplier(rung)),
+                self.max_delay_seconds,
+            )
 
         builder = PromptBuilder(
             stable=self._stable(save),
             volatile=self._volatile(save, emotions, beat, progress.turn),
             history=[Message(
                 "user",
-                f"## 到目前为止的对话\n\n{self._transcript(save_id)}\n\n"
-                "## 现在\n\n按上面的规格输出这一回合的 JSON。",
+                f"## 到目前为止的对话\n\n{self._transcript(save_id)}",
             )],
+            # 最容易被违反的几条挪到对话记录**之后**。
+            # 埋在 12k 前缀开头的规则，模型的遵守度会明显低于紧贴输出位置的。
+            tail=tail_rules(stage.value),
             strict=False,
         )
         messages = builder.build()
@@ -561,7 +809,7 @@ class Agent:
                 )
             except LLMError as exc:
                 log.error("save=%s 生成失败：%s", save_id, exc)
-                processed = fallback("timeout")
+                processed = fallback("timeout", character_id=save["character_id"])
                 break
 
             result.completion = completion
@@ -593,31 +841,92 @@ class Agent:
             result.retries = attempt + 1
             log.warning("save=%s 人设违规 %s，重试", save_id, processed.violations)
             if attempt == MAX_RETRIES:
-                processed = fallback("generic")
+                processed = fallback("generic", character_id=save["character_id"])
 
         if processed is None:
-            processed = fallback("generic")
+            processed = fallback("generic", character_id=save["character_id"])
         result.used_fallback = processed.used_fallback
 
         # ---- 排送达 ----
         cursor = self.schedule.now_local() + timedelta(
             seconds=max(1, int(result.delay_seconds * self.delay_scale))
         )
+        emotion_now = emotions.decayed()
+        last_index = len(processed.messages) - 1
+
         for i, msg in enumerate(processed.messages):
             if i > 0:
                 # 条间间隔代表"她打字多快"，不施加 delay_scale
                 cursor += timedelta(seconds=self._rng.randint(3, 9))
+
+            # 模型标了「收回」的，走「说多了」；否则按情绪掷手滑。
+            # 「说多了」只可能发生在最后一条 —— 越界的是收尾那句，
+            # 撤回了前面几条还挂着，读起来像掉线不像后悔。
+            body, regretted = strip_regret_mark(msg)
+            if regretted and i == last_index:
+                slip = apply_regret(body, self._rng,
+                                    retract_rate=behavior.retract_rate)
+            else:
+                slip = apply_typo(body, self._rng, emotions=emotion_now)
+
+            meta = {"stage": stage.value, "beat": beat.id if beat else None}
+            if slip.kind:
+                meta["slip"] = slip.kind
+                result.slips.append(slip.kind)
+                if slip.sent != body:
+                    # 存原文，给对话记录用。**否则她会模仿自己的错别字** ——
+                    # 错字进历史 → 模型当成她的风格 → 下轮错更多。
+                    # 麦麦的 learn_style 里那条「不要学习 SELF 的发言」防的是同一件事。
+                    meta["clean"] = body
+
+            # 撤回时刻：发出去之后隔几秒才反应过来。
+            # 立刻撤等于没发过，玩家连那行灰字都来不及注意。
+            retract_at = None
+            after = cursor          # 后续消息从这里往后排
+            if slip.retract:
+                after = cursor + timedelta(seconds=self._rng.randint(4, 11))
+                retract_at = after.astimezone(timezone.utc).isoformat()
+
             self.db.add_message(
-                save_id, "assistant", msg,
+                save_id, "assistant", slip.sent,
                 deliver_at=cursor.astimezone(timezone.utc).isoformat(),
                 delivered=False, proactive=(progress.turn == 0),
-                meta={"stage": stage.value, "beat": beat.id if beat else None},
+                meta=meta,
+                retract_at=retract_at, retract_kind=slip.kind if slip.retract else "",
             )
-            result.scheduled.append((msg, cursor))
+            result.scheduled.append((slip.sent, cursor))
+
+            cursor = after
+            for extra in slip.followups:
+                cursor += timedelta(seconds=self._rng.randint(2, 6))
+                self.db.add_message(
+                    save_id, "assistant", extra,
+                    deliver_at=cursor.astimezone(timezone.utc).isoformat(),
+                    delivered=False, proactive=False,
+                    meta={**meta, "followup_of": slip.kind},
+                )
+                result.scheduled.append((extra, cursor))
 
         # ---- 选项 ----
         result.options = (plan.options if plan and plan.options
                           else list(FALLBACK_OPTIONS))[:MAX_OPTIONS]
+
+        # ---- 他这句话对她的影响 ----
+        #
+        # 在这之前，情绪只在**一场戏演完时**跳变一次，回合里玩家说什么都不影响。
+        # 那不是「情绪波动小」，是根本没有输入。
+        for name, delta in (plan.feeling if plan else {}).items():
+            try:
+                emo = Emotion(name)
+            except ValueError:
+                log.warning("save=%s 模型给了未知情绪：%s", save_id, name)
+                continue
+            capped = max(-MAX_TURN_DELTA, min(MAX_TURN_DELTA, delta))
+            if capped > 0:
+                emotions.bump(emo, capped, stage)
+            else:
+                emotions.soothe(emo, -capped)
+            result.feeling[emo.value] = capped
 
         # ---- 推进 ----
         progress.turn += 1
@@ -658,10 +967,28 @@ class Agent:
         else:
             affinity = min(100.0, affinity + 0.4)
 
-        emotions.soothe(Emotion.HURT, 0.06)
+        # 只要他还在说话，委屈就慢慢消 —— 但这只是**没有信号时的兜底**。
+        #
+        # 原来这行是无条件的，等于他说难听话也会让她不那么委屈，只要他还在
+        # 打字。委屈是「你没发现」，不是「你没说话」。
+        #
+        # 模型这轮要是明确报了委屈怎么变（不管涨还是消），就听模型的，
+        # 不要再叠一层 —— 叠了等于同一件事算两遍。
+        if not result.feeling.get(Emotion.HURT.value) and not any(
+            d > 0 for d in result.feeling.values()
+        ):
+            emotions.soothe(Emotion.HURT, 0.06)
+
         new_stage = stage_for_affinity(affinity)
         if new_stage.rank > stage.rank:
             log.info("save=%s 关系推进：%s → %s", save_id, stage.value, new_stage.value)
+
+        # ---- 崩了吗 ----
+        broken = check(emotions.decayed(), cause=last_user or "")
+        if broken is not None:
+            self._enter_overwhelm(save_id, broken, new_stage, save["character_id"])
+            result.overwhelm = Rung.BROKEN.label
+            result.options = self._situation_options()
 
         self.db.update_save(
             save_id, affinity=affinity, stage=new_stage.value,
@@ -684,6 +1011,8 @@ class Agent:
     async def refresh_topics(self, save_id: int) -> TurnResult:
         """玩家主动换话题。当前这场戏就此打住。"""
         save = self._require(save_id)
+        if (gated := self._gate(save)) is not None:
+            return gated
         emotions = EmotionState.from_json(save["emotions"])
         emotions.apply_decay()
 
@@ -734,6 +1063,10 @@ class Agent:
         if due:
             self.db.mark_delivered([m["id"] for m in due])
         return due
+
+    def collect_retractions(self, save_id: int) -> list[dict]:
+        """到点该划掉的消息。见 `Database.due_retractions`。"""
+        return self.db.due_retractions(save_id)
 
     def pending_count(self, save_id: int) -> int:
         with self.db.connect() as c:

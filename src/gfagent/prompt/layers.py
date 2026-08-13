@@ -100,6 +100,22 @@ class PromptBuilder:
     stable: StablePrefix
     volatile: VolatileContext = field(default_factory=VolatileContext)
     history: list[Message] = field(default_factory=list)
+    tail: str = ""
+    """**历史后指令** —— 排在对话记录之后，紧贴输出位置。
+
+    上下文越靠后的指令，模型遵守得越好。原来所有规则都在 12k tokens 的稳定
+    前缀里，埋得越来越深 —— 这解释了一个长期现象：**每加一条规则，效果都递减。**
+    不是规则写得不好，是位置越来越深。
+
+    对应 SillyTavern 角色卡 V2 的 `post_history_instructions`
+    （见 `study/findings.md` 第一条）。
+
+    ⚠️ 只放**最容易被违反的少数几条**。全搬过来等于没搬 —— 尾部的注意力优势
+    是稀缺资源，摊薄了就没了。
+
+    ⚠️ 缓存无损：它在最末尾，不影响前缀匹配。
+    """
+
     strict: bool = True
     """True 时稳定层含易变内容直接抛错。生产建议开着。"""
 
@@ -116,6 +132,21 @@ class PromptBuilder:
             messages.append(Message("system", vol))
 
         messages.extend(self.history)
+
+        tail = self.tail.strip()
+        if tail:
+            # 并进最后一条，而不是新起一条消息。
+            #
+            # 新起一条会产生两条连续的 user —— JSON 模式下我们已经踩过
+            # 「role 组合不寻常导致模型返回空白」的坑（见 agent/core.py
+            # `_transcript` 的注释），不值得为了结构好看再赌一次。
+            # 位置效果是一样的：它仍然是模型读到的最后一段文字。
+            if messages and messages[-1].role == "user":
+                last = messages[-1]
+                messages[-1] = Message(last.role, f"{last.content}{_SEP}{tail}")
+            else:
+                messages.append(Message("user", tail))
+
         return messages
 
     def stable_fingerprint(self) -> str:

@@ -106,9 +106,11 @@ def _flatten_tables(text: str) -> str:
     return _MULTI_BLANK.sub("\n\n", "\n".join(out)).strip()
 
 
-def _render(sections: tuple[Section, ...], char_dir: Path) -> str:
+def _render(sections: tuple[Section, ...], char_dir: Path, stage: str = "") -> str:
     parts: list[str] = []
     for sec in sections:
+        if sec.stages is not None and stage and stage not in sec.stages:
+            continue
         if sec.file in EXCLUDED_FILES:
             raise ValueError(f"{sec.file} 在排除清单里，不应进人设卡")
         path = char_dir / sec.file
@@ -164,9 +166,14 @@ class PersonaCard:
         return self.persona, lex
 
 
-@lru_cache(maxsize=8)
-def load_card(character_id: str = "h01") -> PersonaCard:
+@lru_cache(maxsize=32)
+def load_card(character_id: str = "h01", stage: str = "") -> PersonaCard:
     """装配人设卡。结果缓存 —— 稳定前缀在进程生命周期内不该变。
+
+    `stage` 为 `"S0"`–`"S3"` 时，只装配该阶段适用的样本小节（见 manifest 的
+    `Section.stages`）。空串 ＝ 不门控，装全部；用于工具脚本和体量检查。
+
+    每个阶段是一份独立但稳定的前缀，缓存各自命中。
 
     改了 content/ 需要重启，或调用 `load_card.cache_clear()`。
     """
@@ -176,10 +183,10 @@ def load_card(character_id: str = "h01") -> PersonaCard:
 
     card = PersonaCard(
         character_id=character_id,
-        persona=_render(PERSONA_SECTIONS, char_dir),
-        lexicon=_render(LEXICON_SECTIONS, char_dir),
-        samples=_render(SAMPLE_SECTIONS, char_dir),
-        edge_cases=_render(EDGE_SECTIONS, char_dir),
+        persona=_render(PERSONA_SECTIONS, char_dir, stage),
+        lexicon=_render(LEXICON_SECTIONS, char_dir, stage),
+        samples=_render(SAMPLE_SECTIONS, char_dir, stage),
+        edge_cases=_render(EDGE_SECTIONS, char_dir, stage),
     )
 
     # 阈值定在 12k：稳定前缀在所有玩家之间相同，命中缓存后每次只花

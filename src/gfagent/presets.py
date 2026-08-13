@@ -38,6 +38,9 @@ class Preset:
     """(几天前, 摘要, 重要度)"""
     history: tuple[tuple[str, str], ...] = ()
     """(role, 内容)。最近的一小段对话，让开局不至于凭空开始。"""
+
+    threads: tuple[tuple[str, str, str], ...] = ()
+    """(title, kind, owner)。还悬着的共同事 —— 对话的引力中心。"""
     emotions: tuple[tuple[Emotion, float], ...] = ()
 
     @property
@@ -74,6 +77,7 @@ PRESETS: dict[str, Preset] = {
             ("assistant", "你也很晚。"),
         ),
         emotions=((Emotion.TIRED, 0.3),),
+        threads=(("他借了她一支笔还没还", "物件", "him"),),
     ),
     "s2": Preset(
         key="s2", label="确认期", hint="互相知道了，她开始说「睡了」",
@@ -97,6 +101,10 @@ PRESETS: dict[str, Preset] = {
             ("assistant", "手有点僵。"),
         ),
         emotions=((Emotion.TIRED, 0.25),),
+        threads=(
+            ("他说要请她喝奶茶", "亏欠", "him"),
+            ("她想知道他为什么找她说话", "悬念", "her"),
+        ),
     ),
     "s3": Preset(
         key="s3", label="热恋期", hint="她不撤回了，开始说「我们」",
@@ -133,6 +141,11 @@ PRESETS: dict[str, Preset] = {
             ("assistant", "我们周末还去那家面馆吗。"),
         ),
         emotions=((Emotion.TIRED, 0.35), (Emotion.RELAXED, 0.5)),
+        threads=(
+            ("周末去那家面馆", "约定", "both"),
+            ("他答应带她吃回本", "亏欠", "him"),
+            ("她落在他那的伞", "物件", "her"),
+        ),
     ),
 }
 
@@ -147,6 +160,9 @@ def seed(db: Database, save_id: int, preset_key: str, *, now: datetime | None = 
 
     for content, category in preset.facts:
         db.add_fact(save_id, content, category)
+
+    for title, kind, owner in preset.threads:
+        db.open_thread(save_id, title, kind, owner)
 
     for days_ago, summary, importance in preset.episodes:
         when = now - timedelta(days=days_ago)

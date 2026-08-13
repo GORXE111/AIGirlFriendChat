@@ -109,10 +109,17 @@ def _turn_payload(r) -> dict[str, Any]:
         "affinity": round(r.affinity, 1),
         "emotion_note": r.emotion_note,
         "delay_seconds": r.delay_seconds,
+        # 非空表示她崩着或正在缓 —— 此时 options 是**局面选项**
+        # （tone="局面"），不是她说的话。UI 要另外呈现，不能当普通选项渲染，
+        # 否则玩家分不清「她不理我」和「程序坏了」。
+        "overwhelm": r.overwhelm,
+        "situation": r.situation,
         "diagnostics": {
             "raw": r.raw_text,
+            "feeling": r.feeling,
             "violations": r.violations,
             "cleaned": r.cleaned,
+            "slips": r.slips,
             "retries": r.retries,
             "used_fallback": r.used_fallback,
             "latency_ms": d.latency_ms if d else None,
@@ -172,17 +179,24 @@ async def debug_beats(character_id: str = "h01") -> list[dict[str, Any]]:
 
 
 @app.get("/debug/card")
-async def debug_card(character_id: str = "h01") -> dict[str, Any]:
-    """检查人设卡装配结果。稳定前缀的体量直接决定缓存成本。"""
+async def debug_card(character_id: str = "h01", stage: str = "") -> dict[str, Any]:
+    """检查人设卡装配结果。稳定前缀的体量直接决定缓存成本。
+
+    `stage` 传 S0–S3 看该阶段实际进卡的内容；留空看全量（含所有阶段样本）。
+    """
     try:
-        card = load_card(character_id)
+        card = load_card(character_id, stage)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     persona, lexicon = card.stable_text()
     return {
         "character_id": card.character_id,
+        "stage": stage or "(全量)",
         "approx_tokens": card.approx_tokens,
         "chars": {"persona": len(persona), "lexicon": len(lexicon)},
+        "by_stage": {
+            s: load_card(character_id, s).approx_tokens for s in ("S0", "S1", "S2", "S3")
+        },
         "persona": persona,
         "lexicon": lexicon,
     }
@@ -286,6 +300,10 @@ async def get_state(save_id: int) -> dict[str, Any]:
         "farewell": behavior.farewell,
         "pending": agent.pending_count(save_id),
         "facts": [f["content"] for f in db.get_facts(save_id, 20)],
+        "threads": [
+            {"title": t["title"], "kind": t["kind"], "owner": t["owner"]}
+            for t in db.get_threads(save_id)
+        ],
         "insights": [
             {"content": i["content"], "kind": i["kind"], "weight": i["weight"]}
             for i in db.get_insights(save_id, limit=12)
@@ -403,6 +421,11 @@ async def poll(save_id: int) -> dict[str, Any]:
              "proactive": bool(m["proactive"])}
             for m in due
         ],
+        # 已送达但到点该划掉的。客户端按 id 幂等处理即可（每轮会重报）。
+        "retracted": [
+            {"id": r["id"], "kind": r["retract_kind"]}
+            for r in agent.collect_retractions(save_id)
+        ],
         "pending": agent.pending_count(save_id),
     }
 
@@ -415,6 +438,8 @@ async def force_reflect(save_id: int) -> dict[str, Any]:
         "facts_added": r.facts_added,
         "episodes_added": r.episodes_added,
         "insights_added": r.insights_added,
+        "threads_opened": r.threads_opened,
+        "threads_closed": r.threads_closed,
         "skipped": r.skipped,
         "error": r.error,
     }

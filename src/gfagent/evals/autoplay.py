@@ -88,6 +88,7 @@ class Line:
 class Session:
     preset: str
     style: str
+    character_id: str = "h01"
     lines: list[Line] = field(default_factory=list)
     turns: int = 0
     beats_played: list[str] = field(default_factory=list)
