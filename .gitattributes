@@ -1,0 +1,19 @@
+# 统一换行符。
+#
+# 起因：用脚本批量改文件时，Windows 下 `Path.write_text` 会把 \n 写成 \r\n，
+# 一次提交里凭空多出一千六百行「改动」，真实改动被埋在里面看不见。
+* text=auto eol=lf
+
+# 二进制，不要碰
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.db binary
+
+# Windows 脚本必须是 CRLF，否则 PowerShell 某些版本会报错
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
