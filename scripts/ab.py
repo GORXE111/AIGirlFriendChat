@@ -53,7 +53,7 @@ from typing import Callable, Iterator
 
 from gfagent.agent import Agent
 from gfagent.config import get_settings
-from gfagent.evals import mechanical, play, review
+from gfagent.evals import compare_pair, mechanical, play, review, sign_test
 from gfagent.llm import DeepSeekProvider
 from gfagent.metrics import UsageRecorder
 from gfagent.schedule import ScheduleEngine
@@ -88,42 +88,66 @@ def _without_tail() -> Iterator[None]:
 
 @contextlib.contextmanager
 def _without_feeling() -> Iterator[None]:
-    """关掉 feeling 字段 —— 从输出规格里删掉那一段，并丢弃解析结果。
+    """关掉 feeling 字段 —— 从 tail 里删掉那一条，并丢弃解析结果。
 
     两处都要动：只删规格模型可能还是会输出；只丢结果的话它照样占了注意力。
-    """
-    from gfagent.agent import turn
 
-    original_instructions = turn.instructions
+    ⚠️ feeling 的规格 2026-08 从 `instructions()` 中段挪到了 `tail_rules()`。
+    补丁点跟着挪 —— 留在旧位置的话补丁会静默失效，
+    `assert_arms_differ` 会拦住，但那时候已经浪费了一次调试。
+    """
+    from gfagent.agent import core, turn
+
+    original_tail = core.tail_rules
     original_parse = turn.parse
 
-    def instructions(**kw):
-        text = original_instructions(**kw)
-        head, sep, _ = text.partition("## 他这句话对她的影响（feeling）")
-        if not sep:
-            return text
-        # 砍掉 feeling 那一节，保留它后面的内容
-        tail = text[text.index(sep) :]
-        rest = tail.split("\n\n", 1)
-        return head + (rest[1] if len(rest) > 1 else "")
+    def tail_rules(stage="S0"):
+        text = original_tail(stage)
+        # 砍掉第 5 条（feeling）及其续行，保留结尾的「现在输出 JSON」
+        lines = [
+            ln for ln in text.splitlines()
+            if not ln.startswith("5. feeling") and not ln.startswith("   **大多数回合")
+        ]
+        return "\n".join(lines)
 
     def parse(text, outcome_ids):
         plan = original_parse(text, outcome_ids)
         plan.feeling = {}
         return plan
 
-    turn.instructions = instructions
+    # core 是 `from .turn import ...`，两个模块都要打
     turn.parse = parse
-    # core 是 `from .turn import instructions, parse`，得单独打
-    from gfagent.agent import core
-
-    core_instructions, core_parse = core.instructions, core.parse
-    core.instructions, core.parse = instructions, parse
+    core_parse = core.parse
+    core.parse = parse
+    core.tail_rules = tail_rules
     try:
         yield
     finally:
-        turn.instructions, turn.parse = original_instructions, original_parse
-        core.instructions, core.parse = core_instructions, core_parse
+        turn.parse = original_parse
+        core.parse = core_parse
+        core.tail_rules = original_tail
+
+
+@contextlib.contextmanager
+def _without_stage_gating() -> Iterator[None]:
+    """关掉人设卡的阶段门控 —— 回到「所有阶段的样本一起塞」。
+
+    这个改动当初的理由是「不是省 token，是别给错示范」：S0 的语气样本里
+    混着 S3 的「你过来」「想见你」，模型会往那个方向偏。理由说得通，
+    但一直没有数据。
+
+    ⚠️ 这个变体只在 **S0/S1** 上测得出东西 —— S3 本来就该看到 S3 的样本，
+    门控开关对它几乎没区别。
+    """
+    from gfagent.agent import core
+
+    original = core.load_card
+    # 丢掉 stage，永远装全量卡
+    core.load_card = lambda character_id="h01", stage="": original(character_id, "")
+    try:
+        yield
+    finally:
+        core.load_card = original
 
 
 @contextlib.contextmanager
@@ -142,6 +166,8 @@ VARIANTS: dict[str, Variant] = {
     v.name: v for v in (
         Variant("tail_rules", "历史后指令（PromptBuilder.tail）", _without_tail),
         Variant("feeling", "回合级情绪字段", _without_feeling),
+        Variant("stage_gating", "人设卡按阶段门控样本（建议用 --preset s0/s1）",
+                _without_stage_gating),
     )
 }
 
@@ -186,14 +212,14 @@ async def _one(db, agent, provider, recorder, preset, style, turns) -> tuple:
     return mechanical(session), await review(session, provider, recorder), session
 
 
-async def run_arm(label, ctx, *, n, preset, style, turns) -> Arm:
+async def run_arm(label, ctx, *, variant, n, preset, style, turns) -> Arm:
     settings = get_settings()
     arm = Arm(label=label)
     print(f"\n  {label}", end="", flush=True)
 
-    # 每局一个独立库 —— 存档状态（好感、记忆、情绪）会跨局累积，
-    # 共用一个库的话第 4 局和第 1 局的起点根本不同，两边就不可比了。
-    db = Database(f"data/ab_{label}.db")
+    # 库名带上变体 —— 否则同时跑两个变体会撞在同一个文件上，
+    # 两边的存档互相污染，而且不会报错，只会得出一堆没意义的数。
+    db = Database(f"data/ab_{variant}_{label}.db")
 
     with ctx():
         async with DeepSeekProvider(settings) as provider:
@@ -224,24 +250,72 @@ def assert_arms_differ(variant: Variant) -> None:
     看起来很合理、实际上完全错误的结论 —— 而且没有任何迹象。
 
     不花 token：只装 prompt，不发请求。
+
+    ⚠️ 比对的东西必须覆盖**所有变体可能动的地方**。只比 instructions
+    会漏掉改人设卡的变体，然后误报「补丁失效」——那比不检查还糟。
     """
-    from gfagent.agent import core
+    def snapshot(stage: str) -> str:
+        from gfagent.agent import core
 
-    kw = dict(her_max_chars=30, her_max_messages=2, in_beat=False,
-              can_finish=False, outcome_ids=(), stage="S2")
-    on = core.instructions(**kw) + core.tail_rules("S2")
-    with variant.off():
-        off = core.instructions(**kw) + core.tail_rules("S2")
+        kw = dict(her_max_chars=30, her_max_messages=2, in_beat=False,
+                  can_finish=False, outcome_ids=(), stage=stage)
+        card = core.load_card("h01", stage)
+        persona, lexicon = card.stable_text()
+        return persona + lexicon + core.instructions(**kw) + core.tail_rules(stage)
 
-    if on == off:
+    # 逐阶段比 —— 有些变体（阶段门控）只在特定阶段有区别
+    diffs = {}
+    for stage in ("S0", "S1", "S2", "S3"):
+        on = snapshot(stage)
+        with variant.off():
+            off = snapshot(stage)
+        if on != off:
+            diffs[stage] = abs(len(on) - len(off))
+
+    if not diffs:
         raise SystemExit(
-            f"✗ 变体 {variant.name} 的 off() 没有改变 prompt —— "
+            f"✗ 变体 {variant.name} 的 off() 在任何阶段都没有改变 prompt —— "
             "补丁失效了，跑了也是白跑。"
         )
-    print(f"  （补丁生效：prompt 差 {abs(len(on) - len(off))} 字符）")
+    detail = "、".join(f"{s} 差 {n}" for s, n in diffs.items())
+    print(f"  （补丁生效：{detail} 字符）")
+    if stage_hint := {"S0", "S1", "S2", "S3"} - set(diffs):
+        print(f"  （注意：{'/'.join(sorted(stage_hint))} 阶段两边完全一样，"
+              f"用这些 preset 测不出东西）")
 
 
-def report(variant: Variant, on: Arm, off: Arm, *, n: int) -> dict:
+async def judge_pairs(on: Arm, off: Arm, *, stage: str) -> dict:
+    """成对判优 —— A/B 真正能做决策的那一半。
+
+    绝对打分在 n=6 测不出东西（实测 p=0.77 / 0.36）。这里改成把两边的对局
+    并排给评审选，每对正反各判一次消除位置偏好。
+    """
+    settings = get_settings()
+    pairs = min(len(on.transcripts), len(off.transcripts))
+    if pairs == 0:
+        return {}
+
+    results: list[tuple[str, str]] = []
+    print("\n  成对判优", end="", flush=True)
+    async with DeepSeekProvider(settings) as provider:
+        for i in range(pairs):
+            verdict, why = await compare_pair(
+                on.transcripts[i], off.transcripts[i], provider, stage=stage)
+            results.append((verdict, why))
+            print({"on": " 开", "off": " 关", "tie": " 平"}[verdict],
+                  end="", flush=True)
+    print()
+
+    wins = sum(1 for v, _ in results if v == "on")
+    losses = sum(1 for v, _ in results if v == "off")
+    ties = sum(1 for v, _ in results if v == "tie")
+    return {"wins": wins, "losses": losses, "ties": ties,
+            "p": sign_test(wins, losses),
+            "reasons": [w for v, w in results if v != "tie"][:4]}
+
+
+def report(variant: Variant, on: Arm, off: Arm, *, n: int,
+           pairwise: dict | None = None) -> dict:
     delta = on.mean - off.mean
     print(f"\n{'━' * 62}")
     print(f"  {variant.name} —— {variant.what}")
@@ -259,6 +333,18 @@ def report(variant: Variant, on: Arm, off: Arm, *, n: int) -> dict:
             print(f"    {mark}{k:<6} 开 {on_dims[k]:.1f}  关 {off_dims.get(k, 0):.1f}"
                   f"  Δ {d:+.1f}")
 
+    if pairwise:
+        w, l, t = pairwise["wins"], pairwise["losses"], pairwise["ties"]
+        p = pairwise["p"]
+        print(f"\n  成对判优（每对正反各判一次，不一致算平）：")
+        print(f"    开 {w} 胜　关 {l} 胜　平 {t}　符号检验 p={p:.3f}")
+        if w + l > 0 and p >= 0.05:
+            need = {2: 6, 4: 6, 6: 6, 8: 8, 10: 9}.get(w + l)
+            hint = f"（{w + l} 对里要 {need} 胜才显著）" if need else ""
+            print(f"    ⚠ 不显著 {hint}—— 对数不够，或者真没差别")
+        for why in pairwise.get("reasons", [])[:2]:
+            print(f"    · {why[:110]}")
+
     print("\n  机械指标（不花钱、不抖动，比评审分更可信）：")
     print(f"    人设违规    开 {on.violations}   关 {off.violations}")
     print(f"    走兜底      开 {on.fallbacks}   关 {off.fallbacks}")
@@ -266,8 +352,12 @@ def report(variant: Variant, on: Arm, off: Arm, *, n: int) -> dict:
     print(f"    具体性      开 {statistics.fmean(on.concrete):.0%}"
           f"   关 {statistics.fmean(off.concrete):.0%}")
 
-    # 判读。阈值定在 0.3 —— 评审分本身有噪声，比这小的差别读不出方向。
-    if abs(delta) < 0.3:
+    # 判读优先级：成对判优 > 机械指标 > 绝对打分。
+    # 绝对打分排最后是因为实测它在 n=6 就是噪声（p=0.77 / 0.36）。
+    if pairwise and pairwise["p"] < 0.05:
+        better = "开" if pairwise["wins"] > pairwise["losses"] else "关"
+        verdict = f"**成对判优显著：{better}着更好**（p={pairwise['p']:.3f}）。按这个定。"
+    elif abs(delta) < 0.3:
         verdict = ("评审分看不出差别。看机械指标；如果也没差别，"
                    "这个字段既没帮忙也没添乱 —— 那就要问它值不值那些 token。")
     elif delta > 0:
@@ -288,6 +378,7 @@ def report(variant: Variant, on: Arm, off: Arm, *, n: int) -> dict:
                 "violations": off.violations, "fallbacks": off.fallbacks,
                 "mech_problems": off.mech_problems},
         "delta": round(delta, 3),
+        "pairwise": pairwise or None,
         "verdict": verdict,
         # 分数只说哪边高，不说为什么。差异要靠读对局。
         "transcripts": {"on": on.transcripts, "off": off.transcripts},
@@ -302,6 +393,8 @@ async def main() -> int:
     ap.add_argument("--preset", default="s2")
     ap.add_argument("--style", default="normal")
     ap.add_argument("--turns", type=int, default=10)
+    ap.add_argument("--no-pairwise", action="store_true",
+                    help="跳过成对判优（省 2×N 次调用，但基本等于放弃结论）")
     args = ap.parse_args()
 
     if args.list or not args.variant:
@@ -327,12 +420,14 @@ async def main() -> int:
           f"{args.style} / {args.turns} 轮")
     assert_arms_differ(variant)
 
-    on = await run_arm("开", _nothing, n=args.n, preset=args.preset,
-                       style=args.style, turns=args.turns)
-    off = await run_arm("关", variant.off, n=args.n, preset=args.preset,
-                        style=args.style, turns=args.turns)
+    on = await run_arm("开", _nothing, variant=variant.name, n=args.n,
+                       preset=args.preset, style=args.style, turns=args.turns)
+    off = await run_arm("关", variant.off, variant=variant.name, n=args.n,
+                        preset=args.preset, style=args.style, turns=args.turns)
 
-    result = report(variant, on, off, n=args.n)
+    pairwise = {} if args.no_pairwise else await judge_pairs(
+        on, off, stage=args.preset.upper())
+    result = report(variant, on, off, n=args.n, pairwise=pairwise)
 
     OUT.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%m%d-%H%M")

@@ -25,7 +25,7 @@ SAMPLE = '{"messages":["刚到家。"],"options":[{"text":"嗯","tone":"守住"}
 
 
 def test_variants_are_registered():
-    assert set(ab.VARIANTS) == {"tail_rules", "feeling"}
+    assert set(ab.VARIANTS) == {"tail_rules", "feeling", "stage_gating"}
     for v in ab.VARIANTS.values():
         assert v.what and callable(v.off)
 
@@ -52,16 +52,26 @@ def test_without_tail_restores_on_exception():
 
 # ---------------- feeling ----------------
 
+def test_feeling_spec_lives_in_the_tail_not_mid_prompt():
+    """A/B 显示 feeling 放在 instructions 中段会拖累其他输出。
+
+    规格挪到 tail 之后，中段不该再有它 —— 两处都写等于白挪。
+    """
+    assert "feeling" not in core.instructions(**KW).replace('"feeling": {}', "")
+    assert "feeling" in core.tail_rules("S2")
+
+
 def test_without_feeling_strips_the_spec():
-    base = core.instructions(**KW)
-    assert "feeling）" in base
+    base = core.tail_rules("S2")
+    assert "feeling" in base
 
     with ab._without_feeling():
-        off = core.instructions(**KW)
-        assert "feeling）" not in off
+        off = core.tail_rules("S2")
+        assert "feeling" not in off
         assert len(off) < len(base)
+        assert "现在输出 JSON" in off, "别把结尾一起删了"
 
-    assert core.instructions(**KW) == base
+    assert core.tail_rules("S2") == base
 
 
 def test_without_feeling_also_discards_parsed_values():
