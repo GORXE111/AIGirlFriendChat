@@ -25,9 +25,26 @@ SAMPLE = '{"messages":["刚到家。"],"options":[{"text":"嗯","tone":"守住"}
 
 
 def test_variants_are_registered():
-    assert set(ab.VARIANTS) == {"tail_rules", "feeling", "stage_gating"}
+    assert set(ab.VARIANTS) == {
+        "tail_rules", "feeling", "stage_gating",
+        # 整包门控在 S0 测出「变差」但分不清是哪道门 —— 这四个用来定位
+        "gate_probe", "gate_retract", "gate_flustered", "gate_s3",
+    }
     for v in ab.VARIANTS.values():
         assert v.what and callable(v.off)
+
+
+@pytest.mark.parametrize("name", ["gate_probe", "gate_retract",
+                                  "gate_flustered", "gate_s3"])
+def test_each_gate_variant_isolates_one_section(name):
+    """一个变体只能放回**一节**，否则测出来的还是混合效果。"""
+    from gfagent.persona.loader import load_card
+
+    base = load_card("h01", "S0").samples
+    with ab.VARIANTS[name].off():
+        opened = load_card("h01", "S0").samples
+    assert len(opened) > len(base), "没放回任何东西"
+    assert load_card("h01", "S0").samples == base, "补丁没还原（lru_cache 没清？）"
 
 
 # ---------------- tail_rules ----------------

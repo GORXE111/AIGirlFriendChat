@@ -151,6 +151,39 @@ def _without_stage_gating() -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def _ungate(heading: str) -> Iterator[None]:
+    """只把**一节**样本放回所有阶段，其余门控照旧。
+
+    整包门控在 S0 实测五项指标全部偏负（成对判优 2:4，具体性 17% vs 24%，
+    话题跨度 2.3 vs 3.3），但那测的是四道门捆在一起，**说不出是哪一道的锅**。
+
+    我的判断是「九、S3 热恋期」挡得对、「五、试探」砍错了 ——
+    后者是她在 S0 唯一的主动样本，砍掉之后她只会接话。两者在互相抵消。
+    这个函数就是用来验证这个判断的。
+    """
+    from gfagent.persona import loader
+
+    original = loader.SAMPLE_SECTIONS
+    loader.SAMPLE_SECTIONS = tuple(
+        # frozen dataclass，只能重建
+        loader.Section(sec.file, sec.headings, sec.flatten_tables, None)
+        if heading in sec.headings else sec
+        for sec in original
+    )
+    loader.load_card.cache_clear()      # 不清就永远读到旧卡
+    try:
+        yield
+    finally:
+        loader.SAMPLE_SECTIONS = original
+        loader.load_card.cache_clear()
+
+
+def _gate_variant(name: str, heading: str, why: str) -> Variant:
+    return Variant(f"gate_{name}", f"门控「{heading}」—— {why}",
+                   lambda h=heading: _ungate(h))
+
+
+@contextlib.contextmanager
 def _nothing() -> Iterator[None]:
     yield
 
@@ -166,8 +199,18 @@ VARIANTS: dict[str, Variant] = {
     v.name: v for v in (
         Variant("tail_rules", "历史后指令（PromptBuilder.tail）", _without_tail),
         Variant("feeling", "回合级情绪字段", _without_feeling),
-        Variant("stage_gating", "人设卡按阶段门控样本（建议用 --preset s0/s1）",
+        Variant("stage_gating", "人设卡按阶段门控样本（整包，建议 --preset s0/s1）",
                 _without_stage_gating),
+        # 拆开的四道门。整包测出「S0 变差」但分不清是哪道，这四个用来定位。
+        # 全部要用 --preset s0 —— 其他阶段这些门本来就是开的，测不出东西。
+        _gate_variant("probe", "五、试探（她的越界句）",
+                      "她在 S0 唯一的主动样本，我怀疑这道砍错了"),
+        _gate_variant("retract", "六、撤回",
+                      "小节自注「S1 几乎每次越界后都跟一条」"),
+        _gate_variant("flustered", "八、慌（被撩 · S1）",
+                      "标题里写着 S1"),
+        _gate_variant("s3", "九、S3 · 热恋期",
+                      "S3 直球，我认为这道挡得对"),
     )
 }
 

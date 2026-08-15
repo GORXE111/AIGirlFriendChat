@@ -27,6 +27,7 @@ from ..presets import PRESETS, listing, seed
 from ..schedule import ScheduleEngine
 from ..state import STAGE_BEHAVIOR, EmotionState, Stage
 from ..storage import Database, parse_ts
+from ..storage.db import utcnow
 from ..timewindow import is_peak, now_beijing
 
 log = logging.getLogger(__name__)
@@ -319,16 +320,36 @@ async def get_state(save_id: int) -> dict[str, Any]:
 # ---------------- 消息 ----------------
 
 
+RETRACTED_PLACEHOLDER = "她撤回了一条消息"
+
+
 @app.get("/api/saves/{save_id}/messages")
 async def get_messages(save_id: int, limit: int = 200) -> list[dict[str, Any]]:
+    """历史记录。**撤回的内容不回传。**
+
+    她收回的话只在当时那一刻可见 —— 玩家当时在看就看到了，不在看就只剩
+    一行灰字。刷新页面能读到原文的话，「她撤回了什么」这个悬念直接归零，
+    整个机制白做。
+
+    实时的那一条走 `/poll`：内容在送达那轮就给过客户端了，撤回信号只让它
+    划掉。跟真实 IM 一样。
+    """
     db, _, _ = deps()
     if db.get_save(save_id) is None:
         raise HTTPException(404, "存档不存在")
-    return [
-        {"id": m["id"], "role": m["role"], "content": m["content"],
-         "at": m["created_at"], "proactive": bool(m["proactive"])}
-        for m in db.recent_messages(save_id, limit=limit)
-    ]
+    now = utcnow()
+    out = []
+    for m in db.recent_messages(save_id, limit=limit):
+        gone = bool(m["retract_at"]) and m["retract_at"] <= now
+        out.append({
+            "id": m["id"],
+            "role": m["role"],
+            "content": RETRACTED_PLACEHOLDER if gone else m["content"],
+            "at": m["created_at"],
+            "proactive": bool(m["proactive"]),
+            "retracted": gone,
+        })
+    return out
 
 
 @app.post("/api/saves/{save_id}/open")

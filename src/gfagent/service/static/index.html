@@ -117,6 +117,29 @@
   .opt .tone.后退{background:rgba(224,163,62,.13); color:var(--warn)}
   .opt .txt{flex:1; font-size:14.5px}
 
+  /* ── 撤回 ──
+     她收回的话只在当时那一刻可见。玩家当时在看就看到了，不在看就只剩
+     一行灰字 —— 跟真实 IM 一样，这个不确定性就是这个机制的全部价值。
+     所以先划掉再塌陷，而不是直接换掉：正在看的人会看见「它被收回了」这个
+     动作本身，那比结果更有冲击。 */
+  .bub.striking{text-decoration:line-through; opacity:.45;
+                transition:opacity .9s ease, filter .9s ease; filter:blur(.4px)}
+  .row.gone .bub{background:none; border:1px dashed var(--line);
+                 color:var(--faint); font-size:12.5px; padding:6px 12px;
+                 text-decoration:none; opacity:1; filter:none}
+
+  /* ── 局面 ──
+     她崩着的时候只回得出一个字。这时候还给三个正常选项，玩家会继续正常聊，
+     而她继续只回「……」—— 读起来就是坏了。局面选项把「她不理你」从一个
+     疑似故障的空白，变成一个玩家能操作的处境。 */
+  #bar.situation{background:rgba(226,87,76,.05)}
+  .sithead{display:flex; align-items:center; gap:8px; padding:2px 2px 4px;
+           font-size:12.5px; color:var(--warn)}
+  .sithead b{font-size:11px; letter-spacing:.1em; padding:1px 8px;
+             border-radius:20px; background:rgba(226,87,76,.15); color:var(--bad)}
+  .opt.sit{border-style:dashed}
+  .opt.sit .txt{color:var(--dim)}
+
   .waiting{padding:11px 4px; text-align:center; color:var(--faint); font-size:13px}
 
   .barhead{font-size:11px; color:var(--faint); letter-spacing:.1em;
@@ -269,7 +292,7 @@ const fmtDay = s => {
 };
 
 /* ── 消息渲染 ── */
-function bubble(role, text, at){
+function bubble(role, text, at, id, alreadyGone){
   const empty = $('log').querySelector('.empty');
   if (empty) empty.remove();
 
@@ -282,12 +305,35 @@ function bubble(role, text, at){
 
   const row = document.createElement('div');
   row.className = `row ${role==='user'?'me':'her'} ${grouped?'':'first gap'} last`;
+  if (id != null) row.dataset.id = id;      // 撤回信号靠它找到这一条
+  if (alreadyGone) row.classList.add('gone');
   const b = document.createElement('div');
   b.className = 'bub'; b.textContent = text;
   row.appendChild(b);
   $('log').appendChild(row);
   lastRole = role; lastRow = row;
   scroll();
+}
+
+/* 已经处理过的撤回。/poll 每轮会重报同一批（服务端没有「已通知」标记，
+   客户端幂等更简单），不记的话动画会反复播。 */
+const retracted = new Set();
+
+function retract(id){
+  if (retracted.has(id)) return;
+  retracted.add(id);
+  const row = $('log').querySelector(`.row[data-id="${id}"]`);
+  if (!row) return;                          // 不在当前视图里（翻过页了），忽略
+  const bub = row.querySelector('.bub');
+  if (!bub || row.classList.contains('gone')) return;
+
+  // 先划掉、淡出，让正在看的人看见「它被收回」这个动作，再塌成灰字。
+  bub.classList.add('striking');
+  setTimeout(() => {
+    bub.classList.remove('striking');
+    row.classList.add('gone');
+    bub.textContent = '她撤回了一条消息';
+  }, 1100);
 }
 function note(cls, text){
   const d = document.createElement('div');
@@ -332,10 +378,15 @@ async function pick(id){
   setBar('<div class="waiting">…</div>');
   await loadSaves();
 
+  retracted.clear();
   const msgs = await api(`/api/saves/${id}/messages`);
   if (!msgs.length)
     note('sys','两周前你们因为一件小事加了好友，之后谁也没说话。');
-  msgs.forEach(m => bubble(m.role, m.content, m.at));
+  // 服务端不回传已撤回的原文，历史里只有占位符 —— 刷新页面读不到她收回的话
+  msgs.forEach(m => {
+    if (m.retracted) retracted.add(m.id);
+    bubble(m.role, m.content, m.at, m.id, m.retracted);
+  });
 
   clearInterval(poller); poller = setInterval(tick, 2000);
 
@@ -357,7 +408,16 @@ let held = null;
 
 function setBar(html){ $('bar').innerHTML = html; }
 
+/* 崩溃期的档位。空 = 正常。 */
+let overwhelm = '';
+
 function renderOptions(options){
+  // 局面选项不是「她说的话的回应」，是玩家对处境的处置。
+  // 当成普通选项渲染的话，玩家会继续正常聊而她继续只回「……」，
+  // 读起来就是程序坏了。
+  if (options[0]?.tone === '局面'){ renderSituation(options); return; }
+
+  $('bar').classList.remove('situation');
   setBar(
     '<div class="barhead">你要说</div>' +
     options.map((o,i) => `
@@ -369,7 +429,29 @@ function renderOptions(options){
   );
 }
 
+/* 「她没有回复」必须**说出来**。
+   不说的话，「她在难过」和「程序卡了」在玩家那里是同一件事 ——
+   而这个机制的全部价值就在于玩家知道是前者。 */
+const SITUATION_HINT = {
+  '崩':      '她不想说话。',
+  '缓·长度': '她开始回话了，但还很短。',
+  '缓·标点': '她好像缓过来一些了。',
+};
+
+function renderSituation(options){
+  $('bar').classList.add('situation');
+  setBar(
+    `<div class="sithead"><b>${esc(overwhelm || '崩')}</b>
+       <span>${esc(SITUATION_HINT[overwhelm] || '她不想说话。')}</span></div>` +
+    options.map((o,i) => `
+      <button class="opt sit" onclick="choose(${i})">
+        <span class="txt">${esc(o.text)}</span>
+      </button>`).join('')
+  );
+}
+
 function renderTopics(topics){
+  $('bar').classList.remove('situation');
   if (!topics?.length){
     setBar('<div class="waiting">…</div>');
     return;
@@ -386,6 +468,11 @@ function renderTopics(topics){
 }
 
 function applyTurn(r){
+  const was = overwhelm;
+  overwhelm = r.overwhelm || '';
+  if (overwhelm && !was)      note('sys', '— 她好像不太对劲 —');
+  else if (!overwhelm && was) note('sys', '— 她缓过来了 —');
+
   const b = r.beat || {};
   $('beatbar').classList.toggle('on', !!b.id);
   if (b.id) $('beatbar').textContent = `${b.title} · 第 ${b.turn} 轮`;
@@ -394,11 +481,12 @@ function applyTurn(r){
     note('sys', `— ${b.finished} —`);
   }
 
-  if (r.topics?.length)        held = {topics: r.topics};
-  else if (r.options?.length)  held = {options: r.options};
+  if (r.situation === 'leave')  held = {left: true};
+  else if (r.topics?.length)    held = {topics: r.topics};
+  else if (r.options?.length)   held = {options: r.options};
   // 既没选项也没话题 = 一场戏刚收尾。等她说完再去拉下一批话题，
   // 而不是让这次请求多等一轮 LLM。
-  else                         held = {fetch: true};
+  else                          held = {fetch: true};
 
   if (!r.queued.length) release();
   else setBar('<div class="waiting">…</div>');
@@ -407,9 +495,32 @@ function applyTurn(r){
 function release(){
   if (!held) return;
   const h = held; held = null;
-  if (h.topics) renderTopics(h.topics);
+  if (h.left) renderLeft();
+  else if (h.topics) renderTopics(h.topics);
   else if (h.options) renderOptions(h.options);
   else changeTopic();          // 话锋一转
+}
+
+/* 玩家选了「明天再找她」。
+   **不要顺手去拉新话题** —— 他刚说要走，系统马上又把她端上来，
+   那这个选项就等于没有。给一个明确的出口，让他自己决定什么时候回来。 */
+function renderLeft(){
+  $('bar').classList.add('situation');
+  setBar(
+    '<div class="sithead"><span>今天就到这。她需要点时间。</span></div>' +
+    '<button class="linkbtn" onclick="reopen()">再看看她</button>'
+  );
+}
+
+async function reopen(){
+  barBusy('…');
+  try{
+    const r = await api(`/api/saves/${sid}/open`, {method:'POST'});
+    if (r.queued.length) renderGen(r);
+    applyTurn(r);
+    if (!r.queued.length) release();
+  }catch(e){ barError('打不开'); }
+  refresh();
 }
 
 /* UI 绝不能停在「…」上 —— 出错必须有出口 */
@@ -462,7 +573,10 @@ async function tick(){
   if (!sid) return;
   try{
     const r = await api(`/api/saves/${sid}/poll`);
-    r.messages.forEach(m => bubble('assistant', m.content, m.at));
+    r.messages.forEach(m => bubble('assistant', m.content, m.at, m.id));
+    // 撤回排在送达之后 —— 同一轮里可能既收到消息又收到它的撤回信号，
+    // 顺序必须是先渲染再划掉，否则找不到那一行。
+    (r.retracted || []).forEach(x => retract(x.id));
     typing(r.pending > 0);
     if (r.pending === 0 && held) release();   // 她说完了，现在才给选项
   }catch(e){}
@@ -528,6 +642,12 @@ function renderGen(r){
   if (d.retries) t.push(`<span class="tag warn">重试${d.retries}</span>`);
   if (d.cleaned?.length) t.push(...[...new Set(d.cleaned)]
       .map(c=>`<span class="tag warn">${c}</span>`));
+  // 手滑和撤回不是缺陷，是特意做出来的 —— 单独标，别混进违规里
+  if (d.slips?.length) t.push(...[...new Set(d.slips)]
+      .map(s=>`<span class="tag">${esc(s)}</span>`));
+  const feel = Object.entries(d.feeling || {});
+  if (feel.length) t.push(...feel.map(([k,v]) =>
+      `<span class="tag ${v>0?'warn':'ok'}">${esc(k)} ${v>0?'+':''}${v}</span>`));
   if (!t.length) t.push('<span class="tag ok">干净</span>');
   const secs = r.delay_seconds ?? 0;
   $('dGen').innerHTML = t.join('') +
