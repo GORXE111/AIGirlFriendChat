@@ -203,8 +203,8 @@ VARIANTS: dict[str, Variant] = {
                 _without_stage_gating),
         # 拆开的四道门。整包测出「S0 变差」但分不清是哪道，这四个用来定位。
         # 全部要用 --preset s0 —— 其他阶段这些门本来就是开的，测不出东西。
-        _gate_variant("probe", "五、试探（她的越界句）",
-                      "她在 S0 唯一的主动样本，我怀疑这道砍错了"),
+        # gate_probe 已经结案 —— A/B 证实这道门砍错了，「五、试探」现在
+        # 所有阶段都进卡（见 manifest），没有门可以再关。
         _gate_variant("retract", "六、撤回",
                       "小节自注「S1 几乎每次越界后都跟一条」"),
         _gate_variant("flustered", "八、慌（被撩 · S1）",

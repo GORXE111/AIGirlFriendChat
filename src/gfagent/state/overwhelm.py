@@ -95,6 +95,13 @@ RUNG_MINUTES: dict[Rung, float] = {
 SOOTHE_SPEEDUP = 0.45
 """哄对一次能把当前这级砍掉多少。"""
 
+PUSH_SETBACK = 0.35
+"""崩溃期硬戳一下，把当前这级往后推多少。
+
+比 `SOOTHE_SPEEDUP` 小 —— 戳错的代价不该大于哄对的收益，
+否则玩家学到的是「什么都别做」，那就没有互动了。
+"""
+
 MAX_CREDIT_RATIO = 0.5
 """加速总量的上限，占整段恢复时间的比例。
 
@@ -158,6 +165,21 @@ class Overwhelm:
         return Overwhelm(
             at=self.at, emo=self.emo, peak=self.peak, cause=self.cause,
             credit_minutes=min(ceiling, self.credit_minutes + max(0.0, minutes)),
+        )
+
+    def set_back(self, minutes: float) -> Overwhelm:
+        """戳错了，恢复往后推。
+
+        **惩罚必须落在这里，不能只靠加情绪。** 她崩的时候情绪常常已经
+        饱和在 1.0（阈值 0.85，一轮最多涨 0.5，很容易顶到头），
+        再 bump 会被上限整个吃掉 —— 那时候「戳了她一下」这件事在系统里
+        等于没发生过。
+
+        credit 可以为负，`elapsed_minutes` 会把它算进去。
+        """
+        return Overwhelm(
+            at=self.at, emo=self.emo, peak=self.peak, cause=self.cause,
+            credit_minutes=self.credit_minutes - max(0.0, minutes),
         )
 
     # ---- 序列化 ----

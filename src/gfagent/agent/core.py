@@ -35,6 +35,7 @@ from ..schedule import ScheduleEngine
 from ..state.moods import behavior_note
 from ..state.overwhelm import (
     MAX_TURN_DELTA,
+    PUSH_SETBACK,
     RUNG_MINUTES,
     SOOTHE_SPEEDUP,
     Overwhelm,
@@ -669,8 +670,11 @@ class Agent:
             # 判的是**时机**：她刚崩的时候你去戳，只会更糟；缓了一级之后
             # 再说话才有用。这正是 moods.md「追问对你是压力」的实现。
             if rung is Rung.BROKEN:
+                # 情绪照样加一点，但**惩罚的主体是恢复时间** ——
+                # 她崩的时候情绪常常已经顶到 1.0，bump 会被上限整个吃掉。
                 emotions.bump(Emotion(broken.emo.value), 0.08,
                               Stage(save["stage"]))
+                broken = broken.set_back(RUNG_MINUTES[rung] * PUSH_SETBACK)
                 result.situation = "push_backfired"
             else:
                 broken = broken.sped_up(RUNG_MINUTES[rung] * SOOTHE_SPEEDUP)

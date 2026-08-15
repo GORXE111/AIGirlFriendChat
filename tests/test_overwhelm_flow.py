@@ -222,7 +222,13 @@ async def test_she_always_says_something(tmp_path):
 
 @pytest.mark.asyncio
 async def test_pushing_while_broken_backfires(tmp_path):
-    """moods.md：反复追问「你怎么了」→ 更僵。追问对她是压力。"""
+    """moods.md：反复追问「你怎么了」→ 更僵。追问对她是压力。
+
+    **惩罚必须落在恢复时间上。** 她崩的时候情绪常常已经顶到 1.0
+    （阈值 0.85，一轮最多涨 0.5），再 bump 会被上限整个吃掉 ——
+    这条测试原来断言的是情绪递增，实际上两边都是 1.0，
+    靠读取时衰减产生的浮点尾数（差 1e-9）通过的，等于没测。
+    """
     agent, save_id = _setup(tmp_path, {
         "messages": ["……"], "options": [{"text": "算了", "tone": "后退"}],
         "feeling": {"难过": 0.5},
@@ -231,13 +237,32 @@ async def test_pushing_while_broken_backfires(tmp_path):
         _arm(agent, save_id)
         await agent.choose(save_id, 0)
 
-    before = EmotionState.from_json(
-        agent.db.get_save(save_id)["emotions"]).decayed()[Emotion.SAD]
+    before = Overwhelm.from_json(agent.db.get_save(save_id)["overwhelm"])
     r = await agent.choose(save_id, 1)          # 再说一句
-    after = EmotionState.from_json(
-        agent.db.get_save(save_id)["emotions"]).decayed()[Emotion.SAD]
+    after = Overwhelm.from_json(agent.db.get_save(save_id)["overwhelm"])
 
     assert r.situation == "push_backfired"
+    assert after.credit_minutes < before.credit_minutes, "戳了她一下但什么都没发生"
+    assert after.recovers_at() > before.recovers_at(), "恢复没有被推后"
+
+
+@pytest.mark.asyncio
+async def test_saturated_emotion_does_not_swallow_the_penalty(tmp_path):
+    """情绪顶到 1.0 时，惩罚仍然要生效 —— 这就是它不能只靠 bump 的原因。"""
+    agent, save_id = _setup(tmp_path, {
+        "messages": ["……"], "options": [{"text": "算了", "tone": "后退"}],
+        "feeling": {"难过": 0.5},
+    })
+    for _ in range(2):
+        _arm(agent, save_id)
+        await agent.choose(save_id, 0)
+
+    st = EmotionState.from_json(agent.db.get_save(save_id)["emotions"])
+    assert st.decayed()[Emotion.SAD] == pytest.approx(1.0), "前提没成立，这条测试没意义"
+
+    before = Overwhelm.from_json(agent.db.get_save(save_id)["overwhelm"]).recovers_at()
+    await agent.choose(save_id, 1)
+    after = Overwhelm.from_json(agent.db.get_save(save_id)["overwhelm"]).recovers_at()
     assert after > before
 
 

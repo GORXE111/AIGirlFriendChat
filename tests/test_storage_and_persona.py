@@ -182,11 +182,37 @@ def test_s3_lines_absent_before_s3():
     assert "想见你。" in load_card("h01", "S3").samples
 
 
-def test_probing_starts_at_s1():
-    """S0 她刚加上好友，不会主动扔钩子。"""
-    assert "五、试探" not in load_card("h01", "S0").samples
-    for stage in ("S1", "S2", "S3"):
+def test_probing_is_available_at_every_stage():
+    """原来门控在 S1+，理由是「S0 她不会主动扔钩子」。**A/B 推翻了。**
+
+    S0 单独测（n=10）：放回之后具体性 20%→33%、机械问题 26→18、违规 1→0，
+    四道门里效应最大。漏掉的一半是这节是她唯一的主动样本 ——
+    砍掉之后 S0 只剩反应型样本，她就只会接话。
+    """
+    for stage in ("S0", "S1", "S2", "S3"):
         assert "五、试探" in load_card("h01", stage).samples
+
+
+def test_she_can_speak_first_at_every_stage():
+    """S0 的根问题是她只会回答。
+
+    自动对局里八条成对判优理由有七条的判据是「主动 vs 被动」，
+    跟哪道门在动几乎无关。这一节必须在，而且每个阶段都要。
+    """
+    for stage in ("S0", "S1", "S2", "S3"):
+        samples = load_card("h01", stage).samples
+        assert "四点五、她主动说的" in samples
+        assert "橘色的，蹲在车顶上。" in samples, "看见的东西 —— 最好用的一类"
+
+
+def test_report_and_probe_stay_distinguishable():
+    """报告和试探混在一起，S0 的她会显得太急。
+
+    报告没有下文（「今天降温，冷。」），试探是有所图的（「我今天没带伞。」）。
+    这个区分是那一节存在的全部理由，卡里必须说清楚。
+    """
+    samples = load_card("h01", "S0").samples
+    assert "报告" in samples and "有所图" in samples
 
 
 def test_retract_samples_match_their_own_note():
