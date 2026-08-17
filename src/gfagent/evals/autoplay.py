@@ -101,6 +101,8 @@ class Session:
     her_messages: list[str] = field(default_factory=list)
     option_sets: list[list[Option]] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
+    rejected: list[tuple[str, list[str]]] = field(default_factory=list)
+    """被判违规丢掉的原文。**分辨真阳性和误报的唯一依据。**"""
     fallbacks: int = 0
     retries: int = 0
 
@@ -263,6 +265,7 @@ def _absorb(session: Session, result) -> None:
     if result.options:
         session.option_sets.append(list(result.options))
     session.violations.extend(result.violations)
+    session.rejected.extend(result.rejected)
     session.fallbacks += int(result.used_fallback)
     session.retries += result.retries
     session.slips.extend(result.slips)

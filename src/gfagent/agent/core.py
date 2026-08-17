@@ -55,6 +55,7 @@ from ..state.models import (
     stage_for_affinity,
 )
 from ..storage.db import Database, parse_ts, utcnow
+from ..vocab import _CONCRETE as _CONCRETE_THING
 from . import gates
 from .turn import (
     MAX_OPTIONS,
@@ -133,9 +134,15 @@ class TurnResult:
 
     completion: Completion | None = None
     violations: list[str] = field(default_factory=list)
+    rejected: list[tuple[str, list[str]]] = field(default_factory=list)
+    """(被丢掉的原文, 违规类型)。诊断用 —— 没有它就只能猜违规是真是假。"""
+
     cleaned: list[str] = field(default_factory=list)
     slips: list[str] = field(default_factory=list)
     """本回合发生的手滑／撤回，用于观测。"""
+
+    dropped_repeats: list[str] = field(default_factory=list)
+    """被丢掉的逐字重复。非空说明她又想复读了 —— 观测用，不是错误。"""
     retries: int = 0
     used_fallback: bool = False
     raw_text: str = ""
@@ -359,8 +366,11 @@ class Agent:
                           f"（{beat.min_turns}–{beat.max_turns} 轮）。")
 
         repetition = self._avoid_repetition(save["id"], save["character_id"])
+        ownership = self._whose_is_what(save["id"], save["character_id"])
         if repetition:
             blocks.append(repetition)
+        if ownership:
+            blocks.append(ownership)
 
         can_finish = beat is not None and beat_turn + 1 >= beat.min_turns
         outcome_ids = tuple(o.id for o in beat.outcomes) if beat else ()
@@ -411,6 +421,39 @@ class Agent:
             return json.loads(row.get("meta") or "{}")
         except (json.JSONDecodeError, TypeError):
             return {}
+
+    def _recent_her(self, save_id: int, limit: int = 12) -> list[str]:
+        """她最近说过的原话。用来在后处理里丢掉逐字重复。"""
+        rows = self.db.recent_messages(save_id, limit=limit, delivered_only=False)
+        return [r["content"] for r in rows if r["role"] == "assistant"]
+
+    def _whose_is_what(self, save_id: int, character_id: str = "h01") -> str:
+        """**哪些事是她自己的。**
+
+        真实对局里抓到过：她说「教室的灯坏了一盏」，几轮之后问他
+        「灯修好了吗？」—— 那是她教室的灯。
+
+        对话记录里明明标着「她：」「他：」，她还是混了。光靠标签不够 ——
+        标签是分散在二十几行里的，而这里给的是一份**归拢好的清单**。
+
+        比重复更伤：重复只是无聊，这个直接出戏。
+        """
+        rows = self.db.recent_messages(save_id, limit=HISTORY_TURNS,
+                                       delivered_only=False)
+        mine: list[str] = []
+        for r in rows:
+            if r["role"] != "assistant":
+                continue
+            for mo in _CONCRETE_THING.finditer(r["content"]):
+                if mo.group(0) not in mine:
+                    mine.append(mo.group(0))
+        if len(mine) < 2:
+            return ""
+        return (
+            "**这些是你自己提过的事**：" + "、".join(mine[-10:]) + "。\n"
+            "它们是**你的**，不是他的 —— 不要反过来拿它们去问他"
+            "（你说过教室的灯坏了，就别再问他「灯修好了吗」）。"
+        )
 
     def _avoid_repetition(self, save_id: int, character_id: str = "h01") -> str:
         """反复读提示。
@@ -933,12 +976,20 @@ class Agent:
                 max_chars=behavior.max_chars,
                 max_messages=behavior.max_messages,
                 echo_of=last_user,
+                # 她说过的原话不该再发一遍。prompt 拦不住 ——
+                # 「不要重复上面的句子」已经在易变层里了，她照样把三条
+                # 原话整块又发了一遍（真实对局）。确定性的事确定性地做。
+                said_recently=self._recent_her(save_id),
             )
             result.cleaned = processed.cleaned
+            result.dropped_repeats = processed.dropped_repeats
             if processed.silent or processed.ok:
                 break
 
             result.violations = processed.violations
+            if processed.rejected:
+                result.rejected.append(
+                    (processed.rejected, list(processed.violations)))
             result.retries = attempt + 1
             log.warning("save=%s 人设违规 %s，重试", save_id, processed.violations)
             if attempt == MAX_RETRIES:

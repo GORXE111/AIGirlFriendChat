@@ -170,8 +170,13 @@ def test_fallback_pool():
 
 
 def test_echo_of_player_is_a_violation():
-    """模型顺着样本的裸台词格式续写剧本，把对方的话也复述出来 —— 真机上出现过。"""
-    r = process("你耳朵上那个是耳环吗。\n我们班不止我一个人戴。", echo_of="你耳朵上那个是耳环吗")
+    """模型顺着样本的裸台词格式续写剧本，把对方的话也复述出来 —— 真机上出现过。
+
+    ⚠️ 他这句必须是**陈述**。他提问时她复用他的词是回答，不算复读 ——
+    见 tests/test_repetition.py 的 ANSWERS 那一组。
+    """
+    r = process("我看见你耳朵上戴了个新耳环。\n我们班不止我一个人戴。",
+                echo_of="我看见你耳朵上戴了个新耳环")
     assert not r.ok
     assert "复读玩家" in r.violations
     assert r.messages == []
@@ -179,7 +184,7 @@ def test_echo_of_player_is_a_violation():
 
 def test_echo_ignores_punctuation_differences():
     """标点不同不影响判定 —— 比的是去标点后的内容。"""
-    r = process("你今天怎么这么晚才回。", echo_of="你今天怎么这么晚才回")
+    r = process("我今天在便利店买了关东煮。", echo_of="我今天在便利店买了关东煮")
     assert "复读玩家" in r.violations
 
 

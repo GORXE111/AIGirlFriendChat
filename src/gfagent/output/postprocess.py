@@ -109,6 +109,22 @@ class ProcessResult:
     cleaned: list[str] = field(default_factory=list)
     """做过的外观级清洗，用于观测。"""
 
+    dropped_repeats: list[str] = field(default_factory=list)
+    """丢掉的逐字重复。
+
+    **她说过的原话不该再发一遍**，而这个用 prompt 拦不住 ——
+    真实对局里「你最近几条说的是…不要重复上面的句子」已经在 prompt 里了，
+    她照样把三条原话整块又发了一遍。确定性的事在这里做。
+    """
+
+    rejected: str = ""
+    """判违规而被丢掉的原文。
+
+    **不留档就只能猜。** 复读检测的违规数在基准里从 0 涨到唯一来源，
+    但分不出是真阳性还是又一次误报 —— 而这个检测器我已经改错两次了。
+    被丢的文本本来就在手里，存一份是零成本的。
+    """
+
     used_fallback: bool = False
 
     @property
@@ -210,12 +226,81 @@ def _normalize(s: str) -> str:
     return _PUNCT.sub("", s)
 
 
+# 虚词。判「说的是不是同一件事」时不算数 ——
+# 「我今天看到学校门口修路了」和「校门口修路」共享的实词才是重点。
+_FUNCTION_WORDS = frozenset("我你他她的了是在有和就都也很个着过吗呢吧啊今天")
+
+ECHO_THRESHOLD = 0.75
+"""她这句里的实词有多少来自他刚说的那句，就算复读。
+
+0.75 是折中：接话本来就会重复对方的词（他说「胃疼」她说「还疼吗」，
+共享「疼」是正常的）。要抓的是**整句实词几乎全来自他**的情况。
+"""
+
+
+def _content_chars(s: str) -> set[str]:
+    return {c for c in _normalize(s) if c not in _FUNCTION_WORDS}
+
+
+# 他在提问。**问句里复用他的词是回答，不是复读。**
+#
+# 「你作业写完了吗」→「作业写完了。」实词完全重合，但那是标准应答。
+# 少了这个判断，检测器会把正常回答当违规 —— 12 局基准实测违规从 2 涨到 11、
+# 兜底 4 次，她被逼着说「……」。
+def _asks(text: str) -> bool:
+    t = text.strip()
+    return bool(t.endswith(("吗", "吗。", "吗？", "呢", "呢。", "呢？", "没", "没？",
+                            "?", "？", "吧", "吧。", "吧？"))
+                or re.search(r"什么|怎么|哪个|哪儿|几点|多久|是不是|有没有", t))
+
+
+MIN_ECHO_CHARS = 6
+"""他那句要有这么多实词，复读才算数。
+
+短句本来就容易整句重合（「明天考试吧」→「明天考试。」）。
+要抓的是**他讲了一件事、她原样倒回去**，那种句子不会短。
+"""
+
+
+def _echoes(text: str, echo_of: str) -> bool:
+    """她是不是在复读他刚说的话。
+
+    ⚠️ 这个检查改过两次，两次都错了，记下来免得再犯。
+
+    **第一版方向反了**：`if 他的整句 in 她的这一行` —— 要求他说的话完整
+    出现在她的话里。她的话更短就永远抓不到，而真实失败模式恰恰是
+    **用更少的字重复同一件事**。这个版本从上线到基准复盘没起过作用。
+
+    **第二版误伤了正常应答**：改成「她的实词有多少来自他」之后，
+    「你作业写完了吗」→「作业写完了。」被判违规 —— 那是标准回答。
+    12 局基准实测违规 2→11、兜底 0→4，她被逼着说「……」。
+
+    现在两个前提都要满足：
+
+      1. **他不是在提问** —— 回答问题时复用他的词是应该的
+      2. **他那句够长** —— 短句整句重合是常态，不是复读
+    """
+    if _asks(echo_of):
+        return False
+    src = _content_chars(echo_of)
+    if len(src) < MIN_ECHO_CHARS:
+        return False
+    for line in text.splitlines():
+        mine = _content_chars(line)
+        if len(mine) < 3:
+            continue        # 「嗯。」这种短应答不算复读
+        if len(mine & src) / len(mine) >= ECHO_THRESHOLD:
+            return True
+    return False
+
+
 def process(
     text: str,
     *,
     max_chars: int = 30,
     max_messages: int = 2,
     echo_of: str | None = None,
+    said_recently: list[str] | None = None,
 ) -> ProcessResult:
     """清洗 → 校验 → 拆条。
 
@@ -244,19 +329,31 @@ def process(
 
     result.violations = _detect_violations(text)
 
-    if echo_of:
-        target = _normalize(echo_of)
-        if len(target) >= 4:
-            for line in text.splitlines():
-                if target and target in _normalize(line):
-                    result.violations.append("复读玩家")
-                    break
+    if echo_of and _echoes(text, echo_of):
+        result.violations.append("复读玩家")
 
     if result.violations:
+        result.rejected = text
         result.messages = []
         return result
 
     result.messages = _split_messages(text, max_chars, max_messages)
+
+    # 逐字重复直接丢。**不重试** —— 重试要多花一次调用，而这件事
+    # 确定性可判、确定性可修：她说过的话，删掉就是了。
+    #
+    # 全丢光的话就让她沉默 —— 一句原话都没重复的余地时，
+    # 不说话比复读好。
+    if said_recently:
+        seen = {_normalize(x) for x in said_recently if len(x) > 3}
+        kept = []
+        for m in result.messages:
+            if len(m) > 3 and _normalize(m) in seen:
+                result.dropped_repeats.append(m)
+            else:
+                kept.append(m)
+        result.messages = kept
+
     return result
 
 

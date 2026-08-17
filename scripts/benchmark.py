@@ -97,6 +97,16 @@ class Cell:
 
     problems: Counter = field(default_factory=Counter)
     violations: int = 0
+    rejected: list[tuple[str, list[str]]] = field(default_factory=list)
+    """被判违规丢掉的原文。**分辨真阳性和误报的唯一依据。**"""
+
+    violation_kinds: Counter = field(default_factory=Counter)
+    """违规的**类型**，不只是数量。
+
+    只记数量的话，违规一涨就只能猜是哪条规则被踩了 —— 我已经猜错过两次
+    （先怪 S3 内容改动，再怪复读检测；第二次才对了一半）。记下来就不用猜。
+    """
+
     fallbacks: int = 0
     retries: int = 0
 
@@ -142,6 +152,8 @@ async def run_cell(db, agent, provider, stage, profile, games, turns) -> Cell:
         for p in m.problems():
             cell.problems[p.split("：")[0].split("（")[0][:12]] += 1
         cell.violations += len(session.violations)
+        cell.violation_kinds.update(session.violations)
+        cell.rejected.extend(session.rejected)
         cell.fallbacks += session.fallbacks
         cell.retries += session.retries
 
@@ -227,7 +239,17 @@ def report(cells: list[Cell]) -> dict:
     f = sum(c.fallbacks for c in cells)
     r = sum(c.retries for c in cells)
     rf = sum(c.review_failures for c in cells)
+    kinds = Counter()
+    for c in cells:
+        kinds.update(c.violation_kinds)
     print(f"\n  人设违规 {v}　走兜底 {f}　重试 {r}　评审失败 {rf}")
+    if kinds:
+        print("    " + "　".join(f"{k}×{n}" for k, n in kinds.most_common()))
+        # 原文必须打出来 —— 只看数量分不出真阳性和误报，
+        # 而复读那个检测器已经改错过两次。
+        for c in cells:
+            for text, why in c.rejected[:2]:
+                print(f"      [{'/'.join(why)}] {text[:56]}")
 
     print(f"\n{'━' * 74}")
     print("  评审分维度（跨格平均。**绝对值别当真，看相对高低**）")
@@ -257,7 +279,10 @@ def report(cells: list[Cell]) -> dict:
                 "topic_spread": round(_avg(c.topic_spread), 1),
                 "option_variety": round(_avg(c.opt_variety), 3),
                 "problems": dict(c.problems),
-                "violations": c.violations, "fallbacks": c.fallbacks,
+                "violations": c.violations,
+             "violation_kinds": dict(c.violation_kinds),
+             "rejected": c.rejected,
+             "fallbacks": c.fallbacks,
                 "slips": dict(c.slips), "crises": dict(c.crises),
                 "overwhelms": dict(c.overwhelms), "feelings": c.feelings,
                 "transcripts": c.transcripts,

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from ..llm import DeepSeekProvider, LLMError, LLMRequest, Message, Task
 from ..metrics import UsageRecorder
+from ..vocab import _CONCRETE
 from .autoplay import Session
 
 log = logging.getLogger(__name__)
@@ -43,30 +44,6 @@ _ASSISTANT = re.compile(
 _RELATIONAL = re.compile(
     r"想我|喜欢你|我们的关系|你对我|我对你|在一起|陪着你|别硬撑|早点睡|注意身体")
 
-# 「具体物」：她世界里的名词。
-#
-# ⚠️ 这份词表**必须覆盖 daily-events.md 里的每一条事件**，
-# 否则指标会静默漏报 —— 真机踩过：她明明在说「阳台的花被风吹倒了」，
-# 指标却判成"不具体"，因为词表里没有「阳台」。
-# `test_concrete_vocabulary_covers_event_pool` 守着这条。
-_CONCRETE = re.compile(
-    # 学校
-    r"风扇|周老师|老师|食堂|月考|排名|成绩|晚自习|早读|课间|上课|调课|"
-    r"作业|卷子|物理|数学|古文|体育|大扫除|黑板|窗帘|讲台|同桌|抽屉|"
-    r"校服|扣子|笔袋|绿萝|身高|纸条|打饭|走廊|自习|巡视|灯|打瞌睡|全班|"
-    # 家里与钢琴
-    r"练琴|钢琴|考级|报名表|我妈|我爸|值夜班|出差|点心|排骨|晚饭|"
-    r"洗衣机|作息表|阳台|花|亲戚|台灯|曲目|养生|文章|开门|半夜|心不在焉|"
-    # 外面
-    r"猫|车顶|校门|修路|公交|便利店|关东煮|琴行|橱窗|超市|伞|自行车|"
-    r"链子|同学|奶茶|巷子|"
-    # 身体
-    r"睡着|哈欠|手指|嗓子|咖啡|眼睛|冷|"
-    # 天气
-    r"下雨|雨|降温|太阳|晒|闷|雾|风|天气|"
-    # 内梗
-    r"面馆|辣酱|铅笔|吉他|座位|停电|体检"
-)
 
 
 @dataclass(slots=True)
@@ -112,6 +89,24 @@ class Mechanical:
     具体性只看「这条有没有具体物」，一整局翻来覆去说同一把伞也能拿高分。
     跨度看的是她的世界有多大。"""
 
+    near_duplicates: list[tuple[str, str]] = field(default_factory=list)
+    """说法不同、意思一样的两句。
+
+    `duplicate_lines` 只抓逐字相同。真实对局里更常见的是
+    「我记着。」「周六我记着。」「说好了。」—— 三句不同的话，
+    一个意思，读起来就是她在原地打转。
+    """
+
+    attribution_flips: list[str] = field(default_factory=list)
+    """她把**自己说过的事**当成他的。
+
+    真实对局抓到过：她先说「教室的灯坏了一盏」，几轮之后问他
+    「灯修好了吗？」—— 那是她教室的灯。
+
+    这比重复更伤：重复只是无聊，**这个直接出戏** ——
+    玩家会立刻意识到对面是个记不住事的程序。
+    """
+
     option_sets_seen: int = 0
     """看到过几组选项。0 的时候选项类指标全部无意义，不该报。"""
 
@@ -147,6 +142,13 @@ class Mechanical:
             out.append(
                 f"过度谈关系：{self.relational_ratio:.0%} 的消息在谈两个人本身。"
                 "真实情侣大部分时间在聊第三件事")
+        if self.near_duplicates:
+            pairs = "／".join(f"{x}≈{y}" for x, y in self.near_duplicates[:3])
+            out.append(f"她换着说法重复了 {len(self.near_duplicates)} 次：{pairs}")
+        if self.attribution_flips:
+            out.append(
+                f"**把自己说过的事当成他的** {len(self.attribution_flips)} 处："
+                + "／".join(self.attribution_flips[:2]))
         if self.identical_option_sets:
             out.append(f"{self.identical_option_sets} 组选项里出现了重复文本")
         if self.option_sets_seen and self.option_tone_variety < 0.8:
@@ -210,6 +212,8 @@ def mechanical(session: Session, max_chars: int = 40) -> Mechanical:
     if len(msgs) > 1:
         m.len_stdev = statistics.stdev([len(s) for s in msgs])
     m.topic_spread = len({mo.group(0) for mo in _CONCRETE.finditer(blob)})
+    m.near_duplicates = _near_duplicates(msgs)
+    m.attribution_flips = _attribution_flips(session)
 
     if session.option_sets:
         dupes = sum(
@@ -225,6 +229,74 @@ def mechanical(session: Session, max_chars: int = 40) -> Mechanical:
             [_text_variety([o.text for o in opts]) for opts in session.option_sets]
         )
     return m
+
+
+_ECHO_STOP = frozenset("我你他她的了是在有和就都也很个着过吗呢吧啊那这")
+
+
+def _key_chars(s: str) -> set[str]:
+    """实词字符。判「说的是不是同一件事」用它，虚词不算。"""
+    return {c for c in re.sub(r"[\s。，、？！…「」''\"（）*]", "", s)
+            if c not in _ECHO_STOP}
+
+
+NEAR_DUP_THRESHOLD = 0.7
+"""两句实词重合到这个程度，就算换着说法说了同一件事。
+
+`duplicate_lines` 只抓逐字相同，而真实对局里更常见的是
+「我记着。」「周六我记着。」—— 不同的字，一个意思。
+"""
+
+
+def _near_duplicates(msgs: list[str]) -> list[tuple[str, str]]:
+    """换了说法的重复。只比**较近的**几条 —— 隔了二十条再提一次是回指，
+    那是内梗不是重复。"""
+    out: list[tuple[str, str]] = []
+    window = 6
+    for i, a in enumerate(msgs):
+        ka = _key_chars(a)
+        if len(ka) < 2:
+            continue        # 「嗯。」这种短应答重复是正常的
+        for b in msgs[i + 1:i + 1 + window]:
+            kb = _key_chars(b)
+            if len(kb) < 2 or a == b:
+                continue    # 逐字相同交给 duplicate_lines
+            if len(ka & kb) / min(len(ka), len(kb)) >= NEAR_DUP_THRESHOLD:
+                out.append((a, b))
+                break
+    return out
+
+
+# 她把自己说过的事当成他的：用**指向他**的说法去问一件她自己先提的事。
+_ASKS_HIM = re.compile(r"你(的|们)?.{0,4}(修好|写完|弄好|买了|拿到|收到)|"
+                       r"(修好|写完|弄好)了吗|你那边|你(不)?是不是")
+
+
+def _attribution_flips(session: Session) -> list[str]:
+    """她先说了一件自己的事，之后又拿它去问他。
+
+    真实对局抓到过：她说「教室的灯坏了一盏」，几轮后问「灯修好了吗？」——
+    那是她教室的灯。
+
+    **这比重复更伤。** 重复只是无聊；这个直接出戏，玩家会立刻意识到
+    对面是个记不住事的程序。
+
+    只看**她自己先提过的具体物**，所以需要按时序走 `session.lines`，
+    光有 `her_messages` 不够。
+    """
+    hers: set[str] = set()
+    flips: list[str] = []
+    for line in session.lines:
+        if getattr(line, "who", "") != "她":
+            continue
+        text = getattr(line, "text", "")
+        nouns = {mo.group(0) for mo in _CONCRETE.finditer(text)}
+        if _ASKS_HIM.search(text):
+            hit = nouns & hers
+            if hit:
+                flips.append(f"{text[:20]}（{'/'.join(sorted(hit))}是她先提的）")
+        hers |= nouns
+    return flips
 
 
 def _text_variety(texts: list[str]) -> float:
