@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from ..state.crisis import Level, assess
 from ..state.overwhelm import Overwhelm, Rung
 
 
@@ -43,12 +44,22 @@ class Disposition(str, Enum):
     SITUATION = "situation"
     """她崩着。不调模型，只回一句极短的，选项换成局面处置。"""
 
+    CRISIS = "crisis"
+    """他说了重话。她慌了 —— 打破自己所有的说话规则，秒回、连发。
+
+    **优先于一切**，包括崩溃期。她自己在难过，不代表他说撑不住了她还接着难过 ——
+    那不是这个角色。见 `state/crisis.py`。
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class GateResult:
     disposition: Disposition
     overwhelm: Overwhelm | None = None
     """当前的崩溃记录。`NORMAL` 时也可能非空 —— 那是恢复期，照常走但更慢。"""
+
+    crisis: Level = Level.NONE
+    """他这句话的分量。`DANGER` 时还要出系统层的援助资源。"""
 
     reason: str = ""
     """给日志和观测用。"""
@@ -63,12 +74,28 @@ class GateResult:
         return self.overwhelm.rung() if self.overwhelm is not None else None
 
 
-def evaluate(save: dict, *, now: datetime | None = None) -> GateResult:
+def evaluate(
+    save: dict,
+    *,
+    said: str = "",
+    typed: bool = False,
+    now: datetime | None = None,
+) -> GateResult:
     """所有入口的唯一问句。
+
+    `said` 是玩家刚说的那句话，`typed` 表示是不是他**自己打的**
+    （而不是从我们生成的选项里点的）—— 见 `state/crisis.py`。
 
     **不产生副作用** —— 不写库、不改状态。清账由 `Agent._run` 做，
     因为那里才知道这一轮真的要跑。
     """
+    # 重话优先于一切，**包括她自己正在崩溃**。
+    # 她在难过，不代表他说撑不住了她还接着难过 —— 那不是这个角色。
+    level = assess(said, typed=typed)
+    if level >= Level.HEAVY:
+        return GateResult(Disposition.CRISIS, crisis=level,
+                          reason=f"他说了重话（{level.name}）")
+
     broken = Overwhelm.from_json(save.get("overwhelm"))
     if broken is None:
         return GateResult(Disposition.NORMAL)

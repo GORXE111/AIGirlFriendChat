@@ -304,6 +304,18 @@ class Review:
     def average(self) -> float:
         return sum(self.scores.values()) / len(self.scores) if self.scores else 0.0
 
+    @property
+    def ok(self) -> bool:
+        """评审是否真的出了分。
+
+        **失败的评审不能当成 0 分记进均值。** 评审调用失败或输出不是 JSON 时
+        `average` 是 0.0 —— 那是「没测到」，不是「很差」。
+        混进均值里一次就能把结论掀翻：gate_retract 那轮 10 局里有 1 局评审
+        失败，关组均分被从 3.17 拽到 2.89，凭空造出 Δ +0.36，
+        差点让我得出「这道门砍对了」的结论。
+        """
+        return bool(self.scores)
+
 
 async def review(
     session: Session,

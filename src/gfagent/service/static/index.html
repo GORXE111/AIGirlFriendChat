@@ -85,6 +85,22 @@
   .sys{align-self:center;color:var(--faint);font-size:12.5px;
        text-align:center;max-width:78%;margin:8px 0;line-height:1.6}
 
+  /* ── 援助资源 ──
+     **这不是气泡。** 它是系统层的东西，不是她说的话 —— 视觉上必须
+     一眼能分开，否则玩家会以为是她在给他念热线，那既出戏又不负责任。
+     所以：不居中、不带气泡尾、不用她的配色，走一个中性的卡片。
+
+     也不做成弹窗。弹窗会挡住对话、需要点掉才能继续 ——
+     那是在最不该困住人的时刻困住人。 */
+  .aid{align-self:stretch; margin:14px 2px; padding:12px 14px;
+       border:1px solid var(--line); border-radius:12px;
+       background:var(--panel2); font-size:13px; line-height:1.7}
+  .aid .lead{color:var(--faint); font-size:12px; margin-bottom:8px}
+  .aid .row2{display:flex; justify-content:space-between; gap:12px;
+             padding:3px 0}
+  .aid .row2 b{font-weight:600}
+  .aid .row2 span{color:var(--dim); white-space:nowrap}
+
   #typing{padding:2px 14px 10px;height:38px}
   #typing:not(.on){visibility:hidden}
   .dots{display:inline-flex;gap:4px;padding:11px 15px;background:var(--her);
@@ -335,6 +351,21 @@ function retract(id){
     bub.textContent = '她撤回了一条消息';
   }, 1100);
 }
+/* 援助资源。**「这不是她说的话」这句必须留着。**
+
+   这一刻是故意打破沉浸的 —— 玩家需要知道游戏退开了一步，
+   而不是以为她在给他念热线号码。出戏在这里是对的，不是 bug。 */
+function renderAid(items){
+  if (!items?.length) return;
+  const d = document.createElement('div');
+  d.className = 'aid';
+  d.innerHTML = '<div class="lead">这不是她说的话。</div>' +
+    items.map(r => `<div class="row2"><b>${esc(r.name)}</b>
+                      <span>${esc(r.contact)}</span></div>`).join('');
+  $('log').appendChild(d);
+  lastRole = null; lastRow = null; scroll();
+}
+
 function note(cls, text){
   const d = document.createElement('div');
   d.className = cls; d.textContent = text;
@@ -378,7 +409,7 @@ async function pick(id){
   setBar('<div class="waiting">…</div>');
   await loadSaves();
 
-  retracted.clear();
+  retracted.clear(); pendingAid = [];
   const msgs = await api(`/api/saves/${id}/messages`);
   if (!msgs.length)
     note('sys','两周前你们因为一件小事加了好友，之后谁也没说话。');
@@ -405,6 +436,7 @@ async function pick(id){
    等于让他对着还没看到的话做反应，一秒出戏。
    held 暂存这一回合的选项，等 poll 报告 pending===0 才渲染。 */
 let held = null;
+let pendingAid = [];   // 资源卡，等她说完再出
 
 function setBar(html){ $('bar').innerHTML = html; }
 
@@ -481,6 +513,10 @@ function applyTurn(r){
     note('sys', `— ${b.finished} —`);
   }
 
+  // 资源卡跟选项一起 hold —— **必须等她说完再出**。
+  // 顺序反了看起来就像她在给他念热线号码，那正是最不该有的效果。
+  pendingAid = r.resources || [];
+
   if (r.situation === 'leave')  held = {left: true};
   else if (r.topics?.length)    held = {topics: r.topics};
   else if (r.options?.length)   held = {options: r.options};
@@ -493,6 +529,7 @@ function applyTurn(r){
 }
 
 function release(){
+  if (pendingAid.length){ renderAid(pendingAid); pendingAid = []; }
   if (!held) return;
   const h = held; held = null;
   if (h.left) renderLeft();
@@ -645,6 +682,7 @@ function renderGen(r){
   // 手滑和撤回不是缺陷，是特意做出来的 —— 单独标，别混进违规里
   if (d.slips?.length) t.push(...[...new Set(d.slips)]
       .map(s=>`<span class="tag">${esc(s)}</span>`));
+  if (r.crisis) t.push(`<span class="tag bad">重话·${esc(r.crisis)}</span>`);
   const feel = Object.entries(d.feeling || {});
   if (feel.length) t.push(...feel.map(([k,v]) =>
       `<span class="tag ${v>0?'warn':'ok'}">${esc(k)} ${v>0?'+':''}${v}</span>`));

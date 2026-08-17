@@ -32,6 +32,8 @@ from ..persona.agent_data import load_agent_data
 from ..persona.loader import load_card
 from ..prompt import PromptBuilder, StablePrefix, VolatileContext
 from ..schedule import ScheduleEngine
+from ..config import get_settings
+from ..state.crisis import Level, her_lines, resources
 from ..state.moods import behavior_note
 from ..state.overwhelm import (
     MAX_TURN_DELTA,
@@ -121,6 +123,13 @@ class TurnResult:
 
     situation: str = ""
     """崩溃期玩家做了什么：wait / push_helped / push_backfired / leave。"""
+
+    crisis: str = ""
+    """他说了重话：HEAVY / DANGER。空 ＝ 没有。见 state/crisis.py。"""
+
+    resources: list[dict[str, str]] = field(default_factory=list)
+    """系统层的援助资源。**只在 DANGER 时非空，且不是她的台词** ——
+    前端必须跟对话区分开呈现。"""
 
     completion: Completion | None = None
     violations: list[str] = field(default_factory=list)
@@ -219,13 +228,21 @@ class Agent:
 
     def _volatile(
         self, save: dict, emotions: EmotionState, beat: Beat | None, beat_turn: int,
-        *, notes: str | None = None,
+        *, notes: str | None = None, situation: str = "",
     ) -> VolatileContext:
+        """`situation` 是**这一轮的临时处境**，只进易变层。
+
+        跟 `notes` 不同：`notes` 会**替换**整个输出规格（`_offer_topics`
+        用它换成话题指令），`situation` 是往状态块里**加**一句。
+        决策探针用它把「他三天没回消息」这种前提摆给她，
+        而不动人设卡和输出规格。
+        """
         now_local = self.schedule.now_local()
         stage = Stage(save["stage"])
         behavior = STAGE_BEHAVIOR[stage]
 
         blocks: list[str] = [
+            *( [f"**此刻的处境**：{situation}"] if situation else [] ),
             f"关系阶段：{stage.value}（{stage.label}）。好感 {save['affinity']:.0f}/100。",
             f"称呼对方：{behavior.address_player}。"
             + ("可以使用「我们」。" if behavior.allow_we else "不要使用「我们」。"),
@@ -556,8 +573,13 @@ class Agent:
             self.recorder.record(completion)
         return parse_topics(completion.text, want) or list(FALLBACK_TOPICS)[:want]
 
-    async def choose(self, save_id: int, index: int) -> TurnResult:
-        """玩家选了一个选项。"""
+    async def choose(self, save_id: int, index: int,
+                     situation: str = "") -> TurnResult:
+        """玩家选了一个选项。
+
+        `situation` 只给决策探针用（`scripts/probe.py`）——
+        把「他三天没回消息」这类前提摆给她，正常对局不传。
+        """
         save = self._require(save_id)
         options = self._pending_options(save)
         if not 0 <= index < len(options):
@@ -579,7 +601,7 @@ class Agent:
 
         progress = self._progress(save)
         beat = get_beat(progress.beat_id, save["character_id"]) if progress.beat_id else None
-        return await self._run(save, emotions, beat, progress)
+        return await self._run(save, emotions, beat, progress, situation)
 
     async def start_beat(self, save_id: int, beat_id: str) -> TurnResult:
         """玩家主动开启一场戏。"""
@@ -606,13 +628,86 @@ class Agent:
 
         入口不需要知道有几种闸、分别为什么 —— 见 `agent/gates.py` 的模块文档。
         """
-        result = gates.evaluate(save)
+        result = gates.evaluate(
+            save,
+            said=chosen.text if chosen else "",
+            # 选项文本是我们自己生成的，不是他打的字。
+            # 这个参数决定了会不会出援助资源，见 state/crisis.py。
+            typed=False,
+        )
         if result.normal:
             return None
 
-        # 目前只有一种非正常处置。多一种时在这里分派，**不要回到入口里加 if**。
+        if result.disposition is gates.Disposition.CRISIS:
+            return self._handle_crisis(save, chosen, result.crisis)
+
         assert result.overwhelm is not None
         return self._handle_situation(save, result.overwhelm, chosen)
+
+    # ---------------- 他说了重话 ----------------
+
+    def _handle_crisis(
+        self, save: dict, chosen: Option | None, level: Level,
+    ) -> TurnResult:
+        """她慌了。
+
+        **不调模型。** 两个理由：一是这是最不能出错的时刻，模型可能给出
+        说教、安慰套话、或者「我会一直陪着你」这种空头承诺；二是她这一刻
+        要**打破自己所有的说话规则**，而人设卡里全是「短、克制、不用我」——
+        照着卡演演不出这个反差。
+
+        反差本身就是内容：
+
+            平时              这一刻
+            ──────────────────────────
+            延迟按日程         **秒回**
+            最多两条           **连发三条**
+            省主语 72%        开口就是「我」
+            句号收尾           追问、命令句
+        """
+        save_id = save["id"]
+        if chosen is not None:
+            self.db.add_message(save_id, "user", chosen.text,
+                                meta={"tone": chosen.tone, "crisis": level.name})
+
+        result = TurnResult(stage=Stage(save["stage"]),
+                            affinity=float(save["affinity"]))
+        result.crisis = level.name
+
+        lines = her_lines(level, save["character_id"])
+        if not lines:
+            # agent.yaml 没配 —— 宁可什么都不说，也不能说一句不像她的话。
+            log.error("save=%s 触发重话但角色没有 crisis_lines，只发资源",
+                      save_id)
+        else:
+            # 秒回。这是唯一一个**完全不看日程**的地方 ——
+            # 她在上课、她睡着了，都不重要。
+            cursor = self.schedule.now_local()
+            for i, line in enumerate(self._rng.sample(
+                    list(lines), k=min(3, len(lines)))):
+                if i:
+                    cursor += timedelta(seconds=self._rng.randint(2, 5))
+                self.db.add_message(
+                    save_id, "assistant", line,
+                    deliver_at=cursor.astimezone(timezone.utc).isoformat(),
+                    delivered=False, meta={"crisis": level.name},
+                )
+                result.scheduled.append((line, cursor))
+
+        # 援助资源**只在他自己打字时出**，而且是系统层的东西，不是她的台词。
+        if level is Level.DANGER:
+            result.resources = [
+                {"name": n, "contact": c}
+                for n, c in resources(get_settings().safety_region)
+            ]
+
+        # 选项照常给 —— 这一刻**不能**把玩家困住。
+        # 「不得采取持续互动等方式阻碍用户退出」不是我们的法定义务
+        # （新加坡主体），但它是对的（见 study/market-2026.md）。
+        result.options = list(FALLBACK_OPTIONS)
+        self.db.update_save(
+            save_id, pending_options=[o.as_dict() for o in result.options])
+        return result
 
     # ---------------- 崩溃期 ----------------
 
@@ -746,6 +841,7 @@ class Agent:
     async def _run(
         self, save: dict, emotions: EmotionState,
         beat: Beat | None, progress: BeatProgress,
+        situation: str = "",
     ) -> TurnResult:
         save_id = save["id"]
         stage = Stage(save["stage"])
@@ -784,7 +880,8 @@ class Agent:
 
         builder = PromptBuilder(
             stable=self._stable(save),
-            volatile=self._volatile(save, emotions, beat, progress.turn),
+            volatile=self._volatile(save, emotions, beat, progress.turn,
+                                    situation=situation),
             history=[Message(
                 "user",
                 f"## 到目前为止的对话\n\n{self._transcript(save_id)}",

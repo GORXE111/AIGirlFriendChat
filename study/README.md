@@ -19,3 +19,13 @@ git clone --depth 1 https://github.com/mem0ai/mem0.git
 Open-LLM-VTuber、Amica、Soul of Waifu。
 
 分析见 `findings.md`。
+
+---
+
+其余研究材料：
+
+| 文件 | 内容 |
+|---|---|
+| `findings.md` | 同类项目的分析结论 |
+| `market-2026.md` | 国内 AI 情感陪伴品类的市场调研 |
+| `papers/README.md` | **论文库**——AI 陪伴 / 角色扮演 agent，长期索引 |

@@ -178,6 +178,37 @@ def _ungate(heading: str) -> Iterator[None]:
         loader.load_card.cache_clear()
 
 
+@contextlib.contextmanager
+def _without_section(heading: str) -> Iterator[None]:
+    """整节从人设卡里摘掉。
+
+    跟 `_ungate` 相反：那个是把被门控的节**放回来**，这个是把常驻的节
+    **拿走**，用来验证新加的内容到底有没有用。
+
+    ⚠️ 这是「加内容之前先证明它有用」的唯一手段。上一次凭论证改门控，
+    结论被 A/B 推翻了 —— 新加的东西不测，就是在重复同一个错误。
+    """
+    from gfagent.persona import loader
+
+    original = loader.SAMPLE_SECTIONS
+    trimmed = []
+    for sec in original:
+        if heading not in sec.headings:
+            trimmed.append(sec)
+            continue
+        rest = tuple(h for h in sec.headings if h != heading)
+        if rest:      # 这一节是跟别的打包在一起的，只摘它自己
+            trimmed.append(
+                loader.Section(sec.file, rest, sec.flatten_tables, sec.stages))
+    loader.SAMPLE_SECTIONS = tuple(trimmed)
+    loader.load_card.cache_clear()
+    try:
+        yield
+    finally:
+        loader.SAMPLE_SECTIONS = original
+        loader.load_card.cache_clear()
+
+
 def _gate_variant(name: str, heading: str, why: str) -> Variant:
     return Variant(f"gate_{name}", f"门控「{heading}」—— {why}",
                    lambda h=heading: _ungate(h))
@@ -211,6 +242,9 @@ VARIANTS: dict[str, Variant] = {
                       "标题里写着 S1"),
         _gate_variant("s3", "九、S3 · 热恋期",
                       "S3 直球，我认为这道挡得对"),
+        # 新加的内容也要证明自己有用。用 --preset s0 —— 它就是为 S0 加的。
+        Variant("initiative", "「四点五、她主动说的」样本节",
+                lambda: _without_section("四点五、她主动说的（报告，不是邀请）")),
     )
 }
 
@@ -227,6 +261,9 @@ class Arm:
     fallbacks: int = 0
     concrete: list[float] = field(default_factory=list)
     mech_problems: int = 0
+    review_failures: int = 0
+    """评审没出分的局数。**不计入均值** —— 那是没测到，不是很差。"""
+
     transcripts: list[str] = field(default_factory=list)
     """**必须留档。** 分数只告诉你哪边高，不告诉你为什么。
 
@@ -273,15 +310,17 @@ async def run_arm(label, ctx, *, variant, n, preset, style, turns) -> Arm:
                 mech, rev, session = await _one(
                     db, agent, provider, None, preset, style, turns)
 
-                arm.averages.append(rev.average)
-                if rev.scores:
+                if rev.ok:
+                    arm.averages.append(rev.average)
                     arm.scores.append(rev.scores)
+                else:
+                    arm.review_failures += 1
                 arm.violations += len(session.violations)
                 arm.fallbacks += session.fallbacks
                 arm.concrete.append(mech.concrete_ratio)
                 arm.mech_problems += len(mech.problems())
                 arm.transcripts.append(session.transcript())
-                print(f" {rev.average:.1f}", end="", flush=True)
+                print(f" {rev.average:.1f}" if rev.ok else " ✗", end="", flush=True)
     print()
     return arm
 
@@ -364,8 +403,15 @@ def report(variant: Variant, on: Arm, off: Arm, *, n: int,
     print(f"  {variant.name} —— {variant.what}")
     print(f"  每边 {n} 局")
     print("━" * 62)
-    print(f"\n  评审均分   开 {on.mean:.2f} (σ{on.stdev:.2f})"
-          f"   关 {off.mean:.2f} (σ{off.stdev:.2f})   Δ {delta:+.2f}")
+    print(f"\n  评审均分   开 {on.mean:.2f} (σ{on.stdev:.2f}, {len(on.averages)} 局)"
+          f"   关 {off.mean:.2f} (σ{off.stdev:.2f}, {len(off.averages)} 局)"
+          f"   Δ {delta:+.2f}")
+    if on.review_failures or off.review_failures:
+        # 一定要显式报出来。失败的评审曾经被当成 0 分记进均值，
+        # 10 局里 1 次就把 gate_retract 的关组从 3.17 拽到 2.89，
+        # 凭空造出 Δ +0.36，差点得出完全相反的结论。
+        print(f"    ⚠ 评审失败 开 {on.review_failures} 关 {off.review_failures} 局"
+              f"（已排除，不计入均值）")
 
     on_dims, off_dims = on.by_dimension(), off.by_dimension()
     if on_dims:

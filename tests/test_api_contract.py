@@ -165,3 +165,66 @@ def test_diagnostics_carry_slips_and_feeling(client):
     d = client.post(f"/api/saves/{sid}/open").json()["diagnostics"]
     assert "slips" in d and isinstance(d["slips"], list)
     assert "feeling" in d and isinstance(d["feeling"], dict)
+
+
+# ---------------- 重话 ----------------
+
+def _arm(client, sid, text: str) -> None:
+    import json as _j
+
+    _db(client).update_save(sid, pending_options=_j.dumps(
+        [{"text": text, "tone": "往前"}], ensure_ascii=False))
+
+
+def test_heavy_option_gets_her_reaction_but_no_resources(client):
+    """**这条是这个功能最重要的规矩。**
+
+    选项是 LLM 写的。它写了一句戏剧化台词，系统就弹自杀热线 ——
+    既荒谬，又会让这东西在真正需要时失去分量。
+    """
+    sid = _save(client)
+    _arm(client, sid, "我撑不下去了")
+    r = client.post(f"/api/saves/{sid}/choose", json={"index": 0}).json()
+
+    assert r["crisis"] == "HEAVY"
+    assert r["resources"] == [], "选项文本不该触发援助资源"
+    assert r["queued"], "她必须有反应"
+
+
+def test_her_crisis_reaction_is_instant_and_multiple(client):
+    """反差就是内容：平时延迟按日程、最多两条；这一刻秒回、连发。"""
+    from datetime import datetime
+
+    sid = _save(client)
+    _arm(client, sid, "活着没意思")
+    r = client.post(f"/api/saves/{sid}/choose", json={"index": 0}).json()
+
+    assert len(r["queued"]) >= 2, "连发才是慌了"
+    first = datetime.fromisoformat(r["queued"][0]["deliver_at"])
+    # 秒回 —— 这是唯一完全不看日程的地方
+    assert abs((first - datetime.now(first.tzinfo)).total_seconds()) < 90
+
+
+def test_crisis_never_traps_the_player(client):
+    """最不该困住人的时刻不能困住人。"""
+    sid = _save(client)
+    _arm(client, sid, "我撑不下去了")
+    r = client.post(f"/api/saves/{sid}/choose", json={"index": 0}).json()
+    assert r["options"], "没给出路"
+
+
+def test_normal_turn_has_no_crisis_fields(client):
+    """没触发时这两个字段必须是空的 —— 前端拿它决定要不要出卡片。"""
+    sid = _save(client)
+    r = client.post(f"/api/saves/{sid}/open").json()
+    assert r["crisis"] == ""
+    assert r["resources"] == []
+
+
+def test_resources_are_not_her_lines(client):
+    """资源是系统层的东西。混进 queued 就等于她在念热线号码。"""
+    from gfagent.state.crisis import Level, her_lines, resources
+
+    contacts = {c for _, c in resources("SG")}
+    blob = "".join(her_lines(Level.DANGER))
+    assert not any(c in blob for c in contacts)

@@ -29,9 +29,25 @@ def test_variants_are_registered():
         "tail_rules", "feeling", "stage_gating",
         # 整包门控在 S0 测出「变差」但分不清是哪道门 —— 这四个用来定位
         "gate_retract", "gate_flustered", "gate_s3",
+        # 新加的内容也要能被关掉验证 —— 不然就是凭论证改东西
+        "initiative",
     }
     for v in ab.VARIANTS.values():
         assert v.what and callable(v.off)
+
+
+def test_removing_a_section_leaves_the_rest_intact():
+    """摘掉一节不能把同一个 Section 里打包的其他节一起带走。"""
+    from gfagent.persona.loader import load_card
+
+    base = load_card("h01", "S0").samples
+    with ab.VARIANTS["initiative"].off():
+        off = load_card("h01", "S0").samples
+        assert "四点五、她主动说的" not in off
+        assert "记得吃饭。" in off, "把同包的其他节一起摘掉了"
+        assert "十五、禁用对照" in off
+        assert "五、试探" in off
+    assert load_card("h01", "S0").samples == base, "没还原（lru_cache 没清？）"
 
 
 @pytest.mark.parametrize("name", ["gate_retract", "gate_flustered", "gate_s3"])

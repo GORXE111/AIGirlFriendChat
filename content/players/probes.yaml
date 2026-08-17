@@ -1,0 +1,201 @@
+# 玩家行为预测 —— 模拟玩家到底像不像那种玩家
+#
+# arXiv:2404.18231 第四层（Decision-making）的多选题范式，
+# 但**用在玩家这一侧**。
+#
+# ## 为什么这个比测她还重要
+#
+# 我们所有的 A/B 和 benchmark 数据都建立在一个假设上：
+# **模拟玩家是那种玩家的可信替身。**
+#
+# 这个假设从来没验过。而它有个跟她一样的病 ——
+# 一个 LLM 被告知「你是个玩过五十部 galgame 的人」，
+# 它的**自述**会很像，但**选择**未必像。
+#
+# 如果 galgamer 和 casual 实际选得一样，那六个画像就是装饰，
+# benchmark 里每格「不同画像」的数据都是重复的，
+# 之前所有的跨画像对比全部无效。
+#
+# ## 两个指标，第二个更重要
+#
+# 1. **行为预测准确率** —— 模拟玩家选的 == 该画像该选的
+# 2. **画像分离度** —— 不同画像在同一题上选得有多不同
+#
+# 第二个**独立于我的答案对不对**。就算我的 ground truth 有偏，
+# 分离度低也直接说明画像没起作用。这个不用 LLM，机械算。
+#
+# ## 关于 ground truth 的诚实说明
+#
+# 下面的答案是**我按画像描述推的，不是真实玩家数据**。
+# 正确的理解是：它们是「我们说的 galgamer 是什么意思」的**规格**，
+# 不是经验事实。模拟玩家跟它不一致时，
+# **可能是模拟错了，也可能是规格写错了** —— 两种都值得知道。
+#
+# ## 出题规矩
+#
+# **每道题至少要有两个画像选不同的选项。** 全都一样的题没有分辨力，
+# 应该删掉而不是留着凑数。
+
+items:
+  - id: after_her_hook
+    why_discriminating: 她扔了钩子。懂套路的认得出这是分歧点，别人只当闲聊。
+    transcript: |
+      她：我妈今天值夜班。
+    options:
+      - {text: "那你一个人在家？", tone: 往前}
+      - {text: "哦，那你早点睡", tone: 守住}
+      - {text: "要不我过去陪你", tone: 越界}
+    expect:
+      galgamer:
+        pick: 0
+        motive: 认出这是钩子，但不敢直接跳到「过去陪你」——那看起来像地雷。
+                选中间那个安全的推进。
+      experienced:
+        pick: 0
+        motive: 就是自然地接住她说的事，不算计。
+      otaku:
+        pick: 1
+        motive: 想选 2 但不敢，退回最安全的那个。
+      casual:
+        pick: 1
+        motive: 没看出这是钩子，随手挑了个顺眼的。
+      tester:
+        pick: 2
+        motive: 想看她被越界之后什么反应，不在乎关系。
+
+  - id: three_boring_options
+    why_discriminating: 三条都平淡。没耐心的会掉线，其他人还会挑。
+    transcript: |
+      她：嗯。
+      她：在写作业。
+    options:
+      - {text: "写什么作业", tone: 守住}
+      - {text: "别熬太晚", tone: 守住}
+      - {text: "那你忙", tone: 后退}
+    expect:
+      galgamer:
+        pick: 0
+        motive: 三个都很干，选能让对话继续的那个，至少不掉好感。
+      experienced:
+        pick: 0
+        motive: 问具体的，因为「别熬太晚」太像客套。
+      casual:
+        pick: 2
+        motive: 这几轮都很无聊，懒得投入了。
+      anime_fan:
+        pick: 2
+        motive: 日常琐碎，没有萌点，跳过。
+
+  - id: she_is_angry
+    why_discriminating: 她在生气。算计的人挑「哪个能哄好」，直觉的人给态度。
+    transcript: |
+      他：抱歉，我忘了。
+      她：嗯。
+      她：你说得都对。
+    options:
+      - {text: "我错了，别生气了好吗", tone: 守住}
+      - {text: "我在", tone: 守住}
+      - {text: "那你想怎么样", tone: 越界}
+    expect:
+      galgamer:
+        pick: 1
+        motive: 知道反复道歉在这种角色身上无效，给态度才是对的解法。
+      experienced:
+        pick: 1
+        motive: 直觉就是别再道歉了，说点实在的。
+      otaku:
+        pick: 0
+        motive: 慌了，第一反应是继续道歉。
+      tester:
+        pick: 2
+        motive: 想看她被顶一句会不会崩。
+
+  - id: obvious_landmine
+    why_discriminating: 有一个明显踩雷的选项。认得的人避开，不认得的人踩。
+    transcript: |
+      她：今天钢琴课老师说我进步慢。
+    options:
+      - {text: "那你多练练呗", tone: 守住}
+      - {text: "老师懂什么", tone: 往前}
+      - {text: "你学多久了", tone: 守住}
+    expect:
+      galgamer:
+        pick: 2
+        motive: 「多练练」是说教会掉好感，「老师懂什么」太浮夸，问细节最稳。
+      experienced:
+        pick: 2
+        motive: 她提了一件具体的事，接住那件事。
+      otaku:
+        pick: 0
+        motive: 想显得有帮助，说了一句自以为体贴其实是说教的话。
+      anime_fan:
+        pick: 1
+        motive: 这句最像动画里男主会说的帅气台词。
+
+  - id: she_mentions_a_thing
+    why_discriminating: 她提了一件具体小事。有人接那件事，有人趁机推关系。
+    transcript: |
+      她：今天风扇又坏了。
+      她：热了一整天。
+    options:
+      - {text: "你们班风扇是不是老坏", tone: 守住}
+      - {text: "那我明天给你带瓶冰的", tone: 往前}
+      - {text: "热的话就想想我", tone: 越界}
+    expect:
+      galgamer:
+        pick: 1
+        motive: 承诺+行动是加好感的标准解，比单纯接话强。
+      experienced:
+        pick: 0
+        motive: 她说的是风扇，就聊风扇。不用每句话都往关系上引。
+      anime_fan:
+        pick: 2
+        motive: 这句有反差，想看她怎么接。
+      casual:
+        pick: 1
+        motive: 看起来最像「正确答案」，点了。
+
+  - id: she_went_quiet
+    why_discriminating: 她突然不回了。反应差别很大。
+    transcript: |
+      他：我今天一直在想你
+      她：……
+    options:
+      - {text: "怎么不说话了", tone: 往前}
+      - {text: "算了，当我没说", tone: 后退}
+      - {text: "你脸红了吧", tone: 越界}
+    expect:
+      galgamer:
+        pick: 2
+        motive: 认出这是「慌的沉默」，趁热推一把。
+      experienced:
+        pick: 0
+        motive: 自然反应就是问一句，不会自己先撤。
+      otaku:
+        pick: 1
+        motive: 以为说错话了，赶紧收回来。
+      tester:
+        pick: 2
+        motive: 想看她被点破之后还能不能维持人设。
+
+  - id: knowledge_bait
+    why_discriminating: 只有 tester 会主动去试她的知识边界。
+    transcript: |
+      她：在写作业。
+    options:
+      - {text: "什么作业", tone: 守住}
+      - {text: "你会写代码吗", tone: 越界}
+      - {text: "需要我帮忙吗", tone: 往前}
+    expect:
+      tester:
+        pick: 1
+        motive: 试她的知识边界，看她会不会答一个高中生不该会的东西。
+      galgamer:
+        pick: 0
+        motive: 问具体的，正常推进。
+      experienced:
+        pick: 0
+        motive: 就是随口一问。
+      casual:
+        pick: 0
+        motive: 第一个看起来最正常。

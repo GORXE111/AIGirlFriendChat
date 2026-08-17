@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     auto_reflect: bool = True
     """对话累积到阈值后自动跑慢回路归档。"""
 
+    safety_region: str = "SG"
+    """援助资源按哪个地区配置（SG / MY / TW / HK）。见 state/crisis.py。
+
+    主体在新加坡、首发华语市场，所以默认 SG。**上线前号码要逐条核实。**
+    """
+
     debug: bool = True
     """开发模式。**上线必须设 False**（`.env` 里 `DEBUG=false`）。
 

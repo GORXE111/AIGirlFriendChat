@@ -104,6 +104,18 @@ class Session:
     fallbacks: int = 0
     retries: int = 0
 
+    # ---- 机制触发计数 ----
+    #
+    # 「做了」和「在真实对局里真的会发生」是两回事。手滑是概率的、
+    # 崩溃要连着两轮伤害、重话要选项里真出现那种话 —— 全都可能
+    # 在完整一局里一次都不触发。那样的话它们就只存在于测试里。
+    slips: list[str] = field(default_factory=list)
+    crises: list[str] = field(default_factory=list)
+    overwhelms: list[str] = field(default_factory=list)
+    feelings: list[dict[str, float]] = field(default_factory=list)
+    proactive: int = 0
+    """她主动发起的回合数（`beat_turn == 0` 且非玩家触发）。"""
+
     def transcript(self) -> str:
         return "\n".join(ln.render() for ln in self.lines)
 
@@ -253,3 +265,10 @@ def _absorb(session: Session, result) -> None:
     session.violations.extend(result.violations)
     session.fallbacks += int(result.used_fallback)
     session.retries += result.retries
+    session.slips.extend(result.slips)
+    if result.crisis:
+        session.crises.append(result.crisis)
+    if result.overwhelm:
+        session.overwhelms.append(result.overwhelm)
+    if result.feeling:
+        session.feelings.append(dict(result.feeling))

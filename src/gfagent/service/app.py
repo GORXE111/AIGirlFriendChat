@@ -115,6 +115,10 @@ def _turn_payload(r) -> dict[str, Any]:
         # 否则玩家分不清「她不理我」和「程序坏了」。
         "overwhelm": r.overwhelm,
         "situation": r.situation,
+        # 他说了重话。resources 非空时前端**必须**跟对话区分开呈现 ——
+        # 那不是她的台词，是系统层的东西。见 state/crisis.py。
+        "crisis": r.crisis,
+        "resources": r.resources,
         "diagnostics": {
             "raw": r.raw_text,
             "feeling": r.feeling,

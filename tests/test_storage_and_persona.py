@@ -193,26 +193,67 @@ def test_probing_is_available_at_every_stage():
         assert "五、试探" in load_card("h01", stage).samples
 
 
-def test_she_can_speak_first_at_every_stage():
-    """S0 的根问题是她只会回答。
+def test_retired_section_is_fully_gone():
+    """「四点五」被 A/B 摘掉了 —— manifest 和文件都不该再提。
 
-    自动对局里八条成对判优理由有七条的判据是「主动 vs 被动」，
-    跟哪道门在动几乎无关。这一节必须在，而且每个阶段都要。
+    留一个抽不到的小节名在 manifest 里，每次装卡都 warn 一次，
+    而且下一个人会以为它还在生效。
     """
+    from gfagent.persona.manifest import SAMPLE_SECTIONS
+
+    for sec in SAMPLE_SECTIONS:
+        assert not any("四点五" in h for h in sec.headings)
     for stage in ("S0", "S1", "S2", "S3"):
-        samples = load_card("h01", stage).samples
-        assert "四点五、她主动说的" in samples
-        assert "橘色的，蹲在车顶上。" in samples, "看见的东西 —— 最好用的一类"
+        assert "四点五" not in load_card("h01", stage).samples
 
 
-def test_report_and_probe_stay_distinguishable():
-    """报告和试探混在一起，S0 的她会显得太急。
+def test_s3_carries_her_own_world_not_just_the_relationship():
+    """**基准实测 S3 是最弱的一格。**
 
-    报告没有下文（「今天降温，冷。」），试探是有所图的（「我今天没带伞。」）。
-    这个区分是那一节存在的全部理由，卡里必须说清楚。
+    具体性 12–22%（其他阶段 20–59%）、话题跨度 2.5（其他 3–7）——
+    她到了热恋期反而不说自己的事了，整局只有「你什么时候来」。
+
+    根因是样本：24 条里 18 条完全没有载体。补的这一组是 S3 的主力。
     """
-    samples = load_card("h01", "S0").samples
-    assert "报告" in samples and "有所图" in samples
+    samples = load_card("h01", "S3").samples
+    assert "同一件事，但他在里面" in samples
+    assert "买了两个关东煮。" in samples, "这一组的标杆 ——「两个」什么都没说"
+    assert "今天风扇又坏了。热得我想你那瓶冰水。" in samples
+
+
+def test_s3_marks_the_direct_lines_as_rare():
+    """直球的全部力量来自稀有。
+
+    她一直说「想见你」「你过来」就不是クーデレ了，是普通黏人女友 ——
+    而那个到处都是。
+    """
+    samples = load_card("h01", "S3").samples
+    assert "最多出现一条" in samples
+    assert "3 : 1 : 1" in samples, "比例要写明，不然模型按样本条数猜"
+
+
+def test_s3_warning_only_fires_at_s3():
+    """S3 的陷阱提示不该在别的阶段占位置。"""
+    from gfagent.agent.turn import instructions
+
+    kw = dict(her_max_chars=30, her_max_messages=2, in_beat=False,
+              can_finish=False, outcome_ids=())
+    assert "S3 的陷阱" in instructions(stage="S3", **kw)
+    for stage in ("S0", "S1", "S2"):
+        assert "S3 的陷阱" not in instructions(stage=stage, **kw)
+
+
+def test_s3_options_are_not_all_relationship_moves():
+    """三条全是关系动作会造成死循环：
+
+    她只说关系 → 选项只能是关系动作 → 她下一轮只有关系上下文 → 重复。
+    真实对局里玩家连着三轮打同一个动作，因为她没给别的东西可接。
+    """
+    from gfagent.agent.turn import STAGE_MOVES
+
+    守住 = dict(STAGE_MOVES["S3"])["守住"]
+    assert "那件具体的事" in 守住
+    assert "不在你俩身上" in 守住
 
 
 def test_retract_samples_match_their_own_note():

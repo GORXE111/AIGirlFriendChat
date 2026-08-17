@@ -28,3 +28,7 @@ logs/
 study/*
 !study/README.md
 !study/*.md
+# 论文库：只放 md，入库
+!study/papers/
+study/papers/*
+!study/papers/*.md

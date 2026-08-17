@@ -48,6 +48,7 @@ class AgentData:
     broken_lines: dict[str, tuple[str, ...]] = field(default_factory=dict)
     recovery_openers: dict[str, tuple[str, ...]] = field(default_factory=dict)
     care_kinds: tuple[CareKind, ...] = ()
+    crisis_lines: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     # ---- 取值 ----
 
@@ -60,6 +61,14 @@ class AgentData:
             or self.broken_lines.get("_default")
             or ("……",)
         )
+
+    def crisis_pool(self, level: str) -> tuple[str, ...]:
+        """他说了重话时她说的话。见 `state/crisis.py`。
+
+        **没有兜底成通用句。** 缺了就返回空，调用方必须自己处理 ——
+        这一刻宁可什么都不说，也不能说一句不像她的话。
+        """
+        return self.crisis_lines.get(level, ())
 
     def recovery_pool(self, stage: str) -> tuple[str, ...]:
         """崩溃只可能发生在 S1 以后，所以 S0 落到 S1 的池子。"""
@@ -117,4 +126,5 @@ def load_agent_data(character_id: str = "h01") -> AgentData:
         broken_lines=_pools(raw.get("broken_lines")),
         recovery_openers=_pools(raw.get("recovery_openers")),
         care_kinds=tuple(care),
+        crisis_lines=_pools(raw.get("crisis_lines")),
     )
